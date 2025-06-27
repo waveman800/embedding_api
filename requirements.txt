@@ -1,0 +1,9 @@
+fastapi
+sentence_transformers
+tiktoken
+uvicorn
+numpy
+scikit-learn
+torch>=2.0.0
+pydantic
+starlette
