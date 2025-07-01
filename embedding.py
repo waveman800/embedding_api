@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
-from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_429_TOO_MANY_REQUESTS
+from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_429_TOO_MANY_REQUESTS, HTTP_503_SERVICE_UNAVAILABLE
 import tiktoken
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -22,6 +22,62 @@ from typing import Union, Tuple
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import Normalizer
 from datetime import datetime, timedelta
+import logging
+
+# 配置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 并发控制类
+class ConcurrencyControl:
+    def __init__(self, max_concurrent: int):
+        self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.active_requests = 0
+        self.total_requests = 0
+        self.rejected_requests = 0
+        self.lock = asyncio.Lock()
+        
+    async def acquire(self):
+        """尝试获取信号量"""
+        async with self.lock:
+            self.total_requests += 1
+            
+        # 检查是否有可用的信号量
+        if self.semaphore._value > 0:
+            try:
+                # 非阻塞获取信号量
+                await asyncio.wait_for(self.semaphore.acquire(), timeout=0.001)
+                async with self.lock:
+                    self.active_requests += 1
+                return True
+            except asyncio.TimeoutError:
+                async with self.lock:
+                    self.rejected_requests += 1
+                return False
+            except Exception:
+                async with self.lock:
+                    self.rejected_requests += 1
+                return False
+        else:
+            async with self.lock:
+                self.rejected_requests += 1
+            return False
+    
+    async def release(self):
+        """释放信号量"""
+        async with self.lock:
+            self.active_requests -= 1
+        self.semaphore.release()
+    
+    async def get_stats(self):
+        """获取统计信息"""
+        async with self.lock:
+            return {
+                "active_requests": self.active_requests,
+                "total_requests": self.total_requests,
+                "rejected_requests": self.rejected_requests,
+                "available_slots": self.semaphore._value
+            }
 
 app = FastAPI(title="Embedding API", 
              description="高性能的文本嵌入向量服务",
@@ -38,37 +94,87 @@ app.add_middleware(
 # 健康检查端点
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    return {
+        "status": "healthy", 
+        "timestamp": datetime.utcnow().isoformat(),
+        "model_loaded": embeddings_model is not None
+    }
 
-# 限流中间件
+# 状态监控端点
+@app.get("/status")
+async def status_check():
+    if 'concurrency_control' in globals():
+        stats = await concurrency_control.get_stats()
+        return {
+            "status": "operational",
+            "timestamp": datetime.utcnow().isoformat(),
+            "concurrency": stats,
+            "model_loaded": embeddings_model is not None,
+            "device": DEVICE
+        }
+    else:
+        return {
+            "status": "initializing",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+# 并发控制中间件
 @app.middleware("http")
-async def rate_limiter_middleware(request: Request, call_next):
-    client_ip = request.client.host if request.client else "unknown"
+async def concurrency_control_middleware(request: Request, call_next):
+    # 跳过健康检查和状态检查
+    if request.url.path in ["/health", "/status", "/docs", "/openapi.json"]:
+        return await call_next(request)
     
-    async with rate_limit_lock:
-        now = datetime.utcnow()
-        
-        # 清理过期的请求记录
-        if client_ip in rate_limit_requests:
-            rate_limit_requests[client_ip] = [
-                t for t in rate_limit_requests[client_ip] 
-                if now - t < rate_limit_window
-            ]
-        else:
-            rate_limit_requests[client_ip] = []
-        
-        # 检查是否超过限制
-        if len(rate_limit_requests[client_ip]) >= RATE_LIMIT_REQUESTS:
+    # 尝试获取并发控制信号量
+    if 'concurrency_control' in globals():
+        acquired = await concurrency_control.acquire()
+        if not acquired:
+            # 计算重试延迟（基于当前负载）
+            stats = await concurrency_control.get_stats()
+            retry_after = min(30, max(5, stats["active_requests"] * 2))
+            
+            logger.warning(f"Request rejected due to concurrency limit. Active: {stats['active_requests']}")
+            
             return JSONResponse(
                 status_code=HTTP_429_TOO_MANY_REQUESTS,
-                content={"detail": f"Rate limit exceeded: {RATE_LIMIT_REQUESTS} requests per {RATE_LIMIT_WINDOW} seconds"}
+                content={
+                    "error": "Too Many Requests",
+                    "message": "服务器当前负载过高，请稍后重试",
+                    "retry_after": retry_after,
+                    "active_requests": stats["active_requests"]
+                },
+                headers={"Retry-After": str(retry_after)}
             )
         
-        # 添加当前请求
-        rate_limit_requests[client_ip].append(now)
-    
-    response = await call_next(request)
-    return response
+        try:
+            # 添加请求超时控制
+            response = await asyncio.wait_for(
+                call_next(request), 
+                timeout=float(os.environ.get('REQUEST_TIMEOUT', '60'))
+            )
+            return response
+        except asyncio.TimeoutError:
+            logger.error("Request timeout")
+            return JSONResponse(
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": "Request Timeout",
+                    "message": "请求处理超时，请稍后重试"
+                }
+            )
+        except Exception as e:
+            logger.error(f"Request processing error: {str(e)}")
+            return JSONResponse(
+                status_code=HTTP_503_SERVICE_UNAVAILABLE,
+                content={
+                    "error": "Service Error",
+                    "message": "服务处理异常，请稍后重试"
+                }
+            )
+        finally:
+            await concurrency_control.release()
+    else:
+        return await call_next(request)
 
 
 class EmbeddingProcessRequest(BaseModel):
@@ -89,8 +195,12 @@ class EmbeddingResponse(BaseModel):
 
 
 async def verify_token(request: Request):
-    # 跳过健康检查的认证
-    if request.url.path == "/health":
+    # 跳过健康检查和状态检查的认证
+    if request.url.path in ["/health", "/status"]:
+        return True
+    
+    # 如果API_KEY为空，则跳过认证
+    if not API_KEY:
         return True
         
     auth_header = request.headers.get('Authorization')
@@ -289,21 +399,20 @@ MAX_BATCH_SIZE = int(os.environ.get('MAX_BATCH_SIZE', '32'))
 BATCH_TIMEOUT = float(os.environ.get('BATCH_TIMEOUT', '0.1'))  # 秒
 MAX_QUEUE_SIZE = int(os.environ.get('MAX_QUEUE_SIZE', '100'))
 THREAD_POOL_SIZE = int(os.environ.get('THREAD_POOL_SIZE', '4'))
+MAX_RETRIES = int(os.environ.get('MAX_RETRIES', '3'))
+RETRY_DELAY = float(os.environ.get('RETRY_DELAY', '1.0'))
+REQUEST_TIMEOUT = float(os.environ.get('REQUEST_TIMEOUT', '60'))
 
 # 请求队列和批处理
 request_queue = asyncio.Queue()
 queue_semaphore = asyncio.Semaphore(MAX_QUEUE_SIZE)
 model_lock = threading.Lock()  # 模型访问锁
 
-# 速率限制
-RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', '100'))
-RATE_LIMIT_WINDOW = int(os.environ.get('RATE_LIMIT_WINDOW', '60'))  # 秒
-rate_limit_window = timedelta(seconds=RATE_LIMIT_WINDOW)
-rate_limit_requests: Dict[str, List[datetime]] = {}
-rate_limit_lock = asyncio.Lock()
-
 # 线程池
 executor = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE, thread_name_prefix="embedding_worker")
+
+# 初始化并发控制
+concurrency_control = None
 
 # 打印配置信息
 print("\n=== 配置信息 ===")
@@ -312,6 +421,10 @@ print(f"MODEL_PATH: {MODEL_PATH}")
 print(f"DEVICE: {DEVICE}")
 print(f"PORT: {PORT}")
 print(f"TARGET_DIM: {TARGET_DIM}")
+print(f"MAX_CONCURRENT_REQUESTS: {MAX_CONCURRENT_REQUESTS}")
+print(f"MAX_BATCH_SIZE: {MAX_BATCH_SIZE}")
+print(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
+print(f"MAX_RETRIES: {MAX_RETRIES}")
 print("================\n")
 
 # 全局模型实例
@@ -328,13 +441,17 @@ def load_model():
 
 async def startup():
     """启动时初始化"""
-    # 加载模型
-    load_model()
+    global embeddings_model, concurrency_control
+    print("正在启动服务...")
     
+    # 初始化并发控制
+    concurrency_control = ConcurrencyControl(MAX_CONCURRENT_REQUESTS)
+    logger.info(f"并发控制初始化完成，最大并发数: {MAX_CONCURRENT_REQUESTS}")
+    
+    load_model()
     # 启动批处理协程
-    global batch_processor_task
-    batch_processor_task = asyncio.create_task(batch_processor())
-    print(f"Batch processor started with {THREAD_POOL_SIZE} worker threads")
+    asyncio.create_task(batch_processor())
+    print("服务启动完成!")
 
 async def shutdown():
     """关闭时清理"""
@@ -362,6 +479,5 @@ if __name__ == "__main__":
         host='0.0.0.0',
         port=PORT,
         workers=1,  # 使用单worker，通过异步处理并发
-        limit_concurrency=MAX_CONCURRENT_REQUESTS,
         timeout_keep_alive=30,
     )

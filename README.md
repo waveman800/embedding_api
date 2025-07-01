@@ -7,7 +7,10 @@
 - 🚀 支持多种预训练模型（Qwen3、BGE、M3E、GTE 等）
 - ⚡ 高性能异步处理，支持请求批处理
 - 🔒 支持 API 密钥认证
-- 📊 内置速率限制和并发控制
+- 🛡️ **先进的并发控制** - 使用信号量机制防止服务过载
+- 🔄 **优雅降级** - 超限时返回429状态码而非503错误
+- 📊 实时状态监控和健康检查
+- ⏱️ **请求超时控制** - 防止长时间阻塞
 - 🐳 容器化部署，支持 GPU 加速
 - 🔄 自动下载和管理模型
 
@@ -90,9 +93,28 @@ docker-compose logs -f
 # 健康检查
 curl http://localhost:6008/health
 
+# 状态监控（包含并发统计信息）
+curl http://localhost:6008/status
+
 # 获取 API 文档
 # 在浏览器中访问：http://localhost:6008/docs
 ```
+
+#### 状态监控响应示例
+
+```json
+{
+  "status": "operational",
+  "timestamp": "2024-01-01T12:00:00.000Z",
+  "concurrency": {
+    "active_requests": 2,
+    "total_requests": 150,
+    "rejected_requests": 5,
+    "available_slots": 8
+  },
+  "model_loaded": true,
+  "device": "cuda"
+}
 
 ## API 使用示例
 
@@ -158,12 +180,87 @@ curl -X 'POST' \
 
 ### 测试
 
+#### 并发控制测试
+
+使用内置的测试工具验证服务的并发处理能力：
+
+```bash
+# 基本并发测试（20个并发请求）
+python test_concurrency.py --concurrent 20
+
+# 逐步负载测试（从5到50个并发）
+python test_concurrency.py --gradual --max-concurrent 50
+
+# 指定服务地址和API密钥
+python test_concurrency.py --url http://your-server:6008 --api-key your_key
+```
+
+#### 其他测试
+
 ```bash
 # 运行单元测试
 pytest
 
 # 运行性能测试
 python -m tests.performance_test
+```
+
+## 故障排查
+
+### 常见问题
+
+#### 1. 服务返回 429 错误
+
+**原因**：请求超过了并发限制
+
+**解决方案**：
+- 检查 `/status` 端点查看当前并发情况
+- 调整 `MAX_CONCURRENT_REQUESTS` 参数
+- 实现客户端重试机制，遵循 `Retry-After` 头部
+
+#### 2. 请求超时
+
+**原因**：单个请求处理时间过长
+
+**解决方案**：
+- 调整 `REQUEST_TIMEOUT` 参数
+- 检查模型加载和 GPU 资源使用情况
+- 优化批处理参数 `MAX_BATCH_SIZE`
+
+#### 3. 内存不足
+
+**原因**：模型太大或并发请求过多
+
+**解决方案**：
+- 降低 `MAX_CONCURRENT_REQUESTS` 和 `MAX_BATCH_SIZE`
+- 使用更小的模型
+- 增加系统内存或使用 GPU
+
+### 监控指标
+
+通过 `/status` 端点监控以下指标：
+
+- `active_requests`: 当前活跃请求数
+- `total_requests`: 总请求数
+- `rejected_requests`: 被拒绝的请求数
+- `available_slots`: 可用并发槽位
+
+**建议告警阈值**：
+- 拒绝率 > 5%
+- 平均响应时间 > 2秒
+- 可用槽位 < 2
+
+### 日志分析
+
+```bash
+# 查看实时日志
+docker-compose logs -f
+
+# 查看错误日志
+docker-compose logs | grep ERROR
+
+# 查看并发控制日志
+docker-compose logs | grep "Request rejected"
 ```
 
 ## 部署
