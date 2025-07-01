@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+  # 第一个嵌入API实例
+  embedding-api-1:
+    build:
+      context: .
+      dockerfile: Dockerfile.cn
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - MODEL_PATH=${MODEL_PATH:-/app/models/Qwen3-Embedding-4B}
+      - DEVICE=${DEVICE:-cuda}
+      - PORT=6008
+      - API_KEY=${API_KEY}
+      - TARGET_DIM=${TARGET_DIM:-1536}
+      - ENABLE_BATCH_PROCESSING=${ENABLE_BATCH_PROCESSING:-false}
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-20}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-8}
+      - BATCH_TIMEOUT=${BATCH_TIMEOUT:-0.01}
+      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-2000}
+      - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-8}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-300}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - RETRY_DELAY=${RETRY_DELAY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']  # 使用第一个GPU
+              capabilities: [gpu]
+    networks:
+      - embedding_network
+
+  # 第二个嵌入API实例
+  embedding-api-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.cn
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - MODEL_PATH=${MODEL_PATH:-/app/models/Qwen3-Embedding-4B}
+      - DEVICE=${DEVICE:-cuda}
+      - PORT=6008
+      - API_KEY=${API_KEY}
+      - TARGET_DIM=${TARGET_DIM:-1536}
+      - ENABLE_BATCH_PROCESSING=${ENABLE_BATCH_PROCESSING:-false}
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-20}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-8}
+      - BATCH_TIMEOUT=${BATCH_TIMEOUT:-0.01}
+      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-2000}
+      - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-8}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-300}
+      - MAX_RETRIES=${MAX_RETRIES:-3}
+      - RETRY_DELAY=${RETRY_DELAY:-1.0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']  # 使用第二个GPU（如果有）
+              capabilities: [gpu]
+    networks:
+      - embedding_network
+
+  # Nginx负载均衡器
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"  # 如果需要HTTPS
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./logs:/var/log/nginx
+    depends_on:
+      - embedding-api-1
+      - embedding-api-2
+    networks:
+      - embedding_network
+
+  # 可选：监控服务
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - embedding_network
+
+  grafana:
+    image: grafana/grafana:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    networks:
+      - embedding_network
+
+networks:
+  embedding_network:
+    driver: bridge
+
+volumes:
+  grafana_data:

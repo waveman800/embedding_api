@@ -18,7 +18,7 @@ RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple/ &
 
 # 复制应用文件
 COPY embedding.py requirements.txt .env.example /app/
-COPY setup_env.py start_service.py /app/
+COPY setup_env.py start_service.py setup_qwen3.py disable_batch.py /app/
 
 # 安装依赖
 RUN pip3 install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple/
@@ -30,15 +30,18 @@ COPY models/Qwen3-Embedding-4B /app/models/Qwen3-Embedding-4B
 ENV MODEL_PATH=/app/models/Qwen3-Embedding-4B
 ENV DEVICE=cuda
 ENV PORT=6008
-ENV TARGET_DIM=2560
+ENV TARGET_DIM=1536
+# 批处理控制（新增）
+ENV ENABLE_BATCH_PROCESSING=false
+# 并发控制
 ENV MAX_CONCURRENT_REQUESTS=20
-ENV MAX_BATCH_SIZE=64
+ENV MAX_BATCH_SIZE=8
 ENV MAX_QUEUE_SIZE=2000
 ENV THREAD_POOL_SIZE=8
 ENV REQUEST_TIMEOUT=300
-ENV BATCH_TIMEOUT=0.2
-ENV MAX_RETRIES=5
-ENV RETRY_DELAY=0.5
+ENV BATCH_TIMEOUT=0.01
+ENV MAX_RETRIES=3
+ENV RETRY_DELAY=1.0
 
 # 暴露端口
 EXPOSE 6008

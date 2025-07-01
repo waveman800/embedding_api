@@ -28,11 +28,11 @@ import logging
 try:
     from dotenv import load_dotenv
     load_dotenv()  # 自动加载 .env 文件
-    print("✓ .env 文件加载成功")
+    print("SUCCESS: .env file loaded")
 except ImportError:
-    print("⚠️  python-dotenv 未安装，将使用系统环境变量")
+    print("WARNING: python-dotenv not installed, using system environment variables")
 except Exception as e:
-    print(f"⚠️  加载 .env 文件时出错: {e}")
+    print(f"WARNING: Error loading .env file: {e}")
 
 # 配置日志 - 优化输出格式
 logging.basicConfig(
@@ -450,22 +450,52 @@ async def get_single_embedding(text: str) -> List[float]:
 
 async def get_embeddings_async(texts: List[str]) -> List[List[float]]:
     """异步获取文本嵌入向量"""
-    # 创建future列表
-    loop = asyncio.get_event_loop()
-    futures = [loop.create_future() for _ in texts]
+    # 检查是否启用批处理
+    if not ENABLE_BATCH_PROCESSING:
+        # 直接处理模式：立即处理所有文本
+        try:
+            loop = asyncio.get_event_loop()
+            with model_lock:
+                embeddings = await loop.run_in_executor(
+                    executor,
+                    lambda: embeddings_model.encode(
+                        texts,
+                        convert_to_numpy=True,
+                        show_progress_bar=False,
+                        batch_size=min(len(texts), 32)
+                    )
+                )
+            
+            # 处理嵌入向量维度
+            results = []
+            for emb in embeddings:
+                processed_emb = expand_features(emb, TARGET_DIM)
+                results.append(processed_emb.tolist())
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Direct processing error: {e}")
+            raise
     
-    # 将任务放入队列
-    async with queue_semaphore:
-        for text, future in zip(texts, futures):
-            await request_queue.put((text, future))
-    
-    # 等待所有future完成
-    results = await asyncio.gather(*futures, return_exceptions=True)
-    
-    # 处理异常
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            raise result
+    else:
+        # 批处理模式：使用原有的队列机制
+        # 创建future列表
+        loop = asyncio.get_event_loop()
+        futures = [loop.create_future() for _ in texts]
+        
+        # 将任务放入队列
+        async with queue_semaphore:
+            for text, future in zip(texts, futures):
+                await request_queue.put((text, future))
+        
+        # 等待所有future完成
+        results = await asyncio.gather(*futures, return_exceptions=True)
+        
+        # 处理异常
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                raise result
             
     return results
 
@@ -486,6 +516,7 @@ def load_config():
         config['TARGET_DIM'] = int(os.environ.get('TARGET_DIM', '2560'))
         
         # 并发控制配置
+        config['ENABLE_BATCH_PROCESSING'] = os.environ.get('ENABLE_BATCH_PROCESSING', 'true').lower() == 'true'
         config['MAX_CONCURRENT_REQUESTS'] = int(os.environ.get('MAX_CONCURRENT_REQUESTS', '10'))
         config['MAX_BATCH_SIZE'] = int(os.environ.get('MAX_BATCH_SIZE', '32'))
         config['BATCH_TIMEOUT'] = float(os.environ.get('BATCH_TIMEOUT', '0.1'))
@@ -522,6 +553,7 @@ try:
     DEVICE = CONFIG['DEVICE']
     PORT = CONFIG['PORT']
     TARGET_DIM = CONFIG['TARGET_DIM']
+    ENABLE_BATCH_PROCESSING = CONFIG['ENABLE_BATCH_PROCESSING']
     MAX_CONCURRENT_REQUESTS = CONFIG['MAX_CONCURRENT_REQUESTS']
     MAX_BATCH_SIZE = CONFIG['MAX_BATCH_SIZE']
     BATCH_TIMEOUT = CONFIG['BATCH_TIMEOUT']
@@ -552,7 +584,7 @@ concurrency_control = None
 def print_config():
     """打印当前配置信息 - 简化版本"""
     print("\n" + "="*40)
-    print("🚀 Embedding API Service")
+    print("Embedding API Service")
     print("="*40)
     
     # 基础配置
@@ -562,7 +594,8 @@ def print_config():
     print(f"API Key: {api_key_display}")
     
     # 并发配置
-    print(f"Concurrency: {MAX_CONCURRENT_REQUESTS} | Batch: {MAX_BATCH_SIZE} | Threads: {THREAD_POOL_SIZE}")
+    batch_mode = "Enabled" if ENABLE_BATCH_PROCESSING else "Disabled (Direct)"
+    print(f"Concurrency: {MAX_CONCURRENT_REQUESTS} | Batch: {batch_mode} | Threads: {THREAD_POOL_SIZE}")
     
     # 配置来源
     env_file = os.path.join(os.path.dirname(__file__), '.env')
@@ -631,7 +664,7 @@ def load_model():
 async def startup():
     """启动时初始化"""
     global embeddings_model, concurrency_control
-    print("正在启动服务...")
+    print("Starting service...")
     
     # 初始化优化的并发控制
     concurrency_control = ConcurrencyControl(
@@ -641,9 +674,13 @@ async def startup():
     logger.info(f"Concurrency control initialized: max={MAX_CONCURRENT_REQUESTS}")
     
     load_model()
-    # 启动批处理协程
-    asyncio.create_task(batch_processor())
-    print("服务启动完成!")
+    
+    # 只在启用批处理时启动批处理协程
+    if ENABLE_BATCH_PROCESSING:
+        asyncio.create_task(batch_processor())
+        print("Service started! (Batch processing mode)")
+    else:
+        print("Service started! (Direct processing mode)")
 
 async def shutdown():
     """关闭时清理"""

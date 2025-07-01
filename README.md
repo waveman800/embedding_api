@@ -16,9 +16,10 @@
 
 ## 支持的模型
 
-### 🆕 Qwen3 系列（推荐）
-- **Alibaba-NLP/gte-Qwen2-1.5B-instruct** - 轻量级高性能模型，1536维嵌入
+### 🆕 Qwen3 系列（强烈推荐）
+- **Qwen/Qwen3-Embedding-4B** ⭐ - **首选模型**，4B参数，1536维嵌入，性能卓越
 - **Alibaba-NLP/gte-Qwen2-7B-instruct** - 大型高质量模型，4096维嵌入
+- **Alibaba-NLP/gte-Qwen2-1.5B-instruct** - 轻量级高性能模型，1536维嵌入
 - **Alibaba-NLP/gte-large-en-v1.5** - 英文专用大型模型
 - **Alibaba-NLP/gte-base-en-v1.5** - 英文专用基础模型
 
@@ -34,13 +35,16 @@
 
 ### 🎯 模型选择建议
 
-| 场景 | 推荐模型 | 维度 | 特点 |
-|------|------------|------|------|
-| **轻量级部署** | gte-Qwen2-1.5B-instruct | 1536 | 快速、低内存 |
-| **通用应用** | bge-m3 | 1024 | 多语言、稳定 |
-| **高质量需求** | gte-Qwen2-7B-instruct | 4096 | 最佳效果、高精度 |
-| **中文专用** | bge-large-zh | 1024 | 中文优化 |
-| **英文专用** | gte-large-en-v1.5 | 1024 | 英文优化 |
+| 场景 | 推荐模型 | 维度 | 特点 | 推荐等级 |
+|------|------------|------|------|----------|
+| **通用首选** ⭐ | **Qwen3-Embedding-4B** | 1536 | **最佳平衡、高性能** | 🎆 强烈推荐 |
+| **轻量级部署** | gte-Qwen2-1.5B-instruct | 1536 | 快速、低内存 | 👍 推荐 |
+| **极致性能** | gte-Qwen2-7B-instruct | 4096 | 最佳效果、高精度 | 👍 推荐 |
+| **传统稳定** | bge-m3 | 1024 | 多语言、稳定 | ✅ 可用 |
+| **中文专用** | bge-large-zh | 1024 | 中文优化 | ✅ 可用 |
+| **英文专用** | gte-large-en-v1.5 | 1024 | 英文优化 | ✅ 可用 |
+
+> 🎆 **特别推荐**: Qwen3-Embedding-4B 是目前性能最优秀的嵌入模型，在中英文理解、语义相似度和计算效率方面都表现出色。
 
 ## 快速开始
 
@@ -50,9 +54,56 @@
 - Docker Compose 1.29+
 - NVIDIA Container Toolkit（如需 GPU 支持）
 
-### 2. 配置
+### 部署方式
 
-#### 方法一：使用自动设置脚本（推荐）
+### 🚀 Docker Compose 部署（推荐）
+
+Docker Compose 提供了最简单、一致的部署方式。
+
+#### 快速部署
+
+```bash
+# 1. 准备模型
+python setup_qwen3.py qwen3-4b
+
+# 2. 配置环境
+cp .env.example .env
+# 编辑 .env 文件，设置 API_KEY 等参数
+
+# 3. 一键部署
+python deploy.py --mode gpu --test
+
+# 或者手动部署
+docker-compose up -d
+```
+
+#### 部署选项
+
+| 模式 | 命令 | 说明 |
+|------|------|------|
+| GPU单实例 | `python deploy.py --mode gpu` | 默认模式，适合大部分场景 |
+| CPU单实例 | `python deploy.py --mode cpu` | 无GPU环境 |
+| 多实例负载均衡 | `python deploy.py --scale` | 高可用性部署 |
+
+#### 服务管理
+
+```bash
+# 查看服务状态
+docker-compose ps
+
+# 查看日志
+docker-compose logs -f embedding-api
+
+# 重启服务
+docker-compose restart
+
+# 停止服务
+docker-compose down
+```
+
+详细部署指南请参考：[DOCKER_DEPLOYMENT.md](DOCKER_DEPLOYMENT.md)
+
+### 方式二：直接运行使用自动设置脚本（推荐）
 
 使用我们提供的环境设置脚本快速配置：
 
@@ -103,6 +154,25 @@ python setup_env.py
 #### 方法一：使用智能构建脚本（推荐）
 
 ```bash
+# 推荐：使用Qwen3-Embedding-4B模型（最佳性能）
+# 如果你已经有本地模型，直接跳到手动配置部分
+
+# 推荐：使用自动设置脚本下载Qwen3-4B模型（首选）
+python setup_qwen3.py qwen3-4b    # 🎆 强烈推荐：Qwen3-Embedding-4B
+
+# 或者下载其他Qwen模型：
+python setup_qwen3.py qwen2-1.5b  # 轻量级模型
+python setup_qwen3.py qwen2-7b   # 高质量模型
+
+# 指定自定义路径
+python setup_qwen3.py qwen3-4b --path ./models/my-qwen3-model
+
+# 查看所有支持的模型
+python setup_qwen3.py --list
+
+# 仅下载模型，不更新.env文件
+python setup_qwen3.py qwen3-4b --no-env
+
 # 使用智能构建脚本，包含前置检查和构建指导
 python build_docker.py
 ```
@@ -211,6 +281,31 @@ curl -X 'POST' \
 ```
 
 ## 性能调优
+
+### 🔄 批处理模式控制
+
+服务支持两种处理模式：
+
+**直接处理模式（推荐）**：
+- 设置 `ENABLE_BATCH_PROCESSING=false`
+- 每个请求立即处理，无等待时间
+- 适合单个或少量请求的场景
+- 响应速度最快
+
+**批处理模式**：
+- 设置 `ENABLE_BATCH_PROCESSING=true`
+- 多个请求打包处理，提高吞吐量
+- 适合大量并发请求的场景
+- 可能有轻微延迟
+
+```bash
+# 快速禁用批处理（推荐）
+python disable_batch.py
+
+# 手动配置
+ENABLE_BATCH_PROCESSING=false  # 禁用批处理
+ENABLE_BATCH_PROCESSING=true   # 启用批处理
+```
 
 ### 🚀 Qwen3 模型优化配置
 

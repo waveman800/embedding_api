@@ -8,32 +8,30 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-6008}:${PORT:-6008}"
-    # 移除 volumes 挂载，因为模型已经打包在镜像中
     env_file:
       - .env
     environment:
       # Qwen3 模型配置（已打包在镜像中）
       - MODEL_PATH=${MODEL_PATH:-/app/models/Qwen3-Embedding-4B}
-      - DEVICE=${DEVICE:-cuda}  # 如果没有GPU，可以设置为cpu
+      - DEVICE=cpu  # CPU模式
       - PORT=${PORT:-6008}
       - API_KEY=${API_KEY}
       # Qwen3 优化配置
       - TARGET_DIM=${TARGET_DIM:-1536}  # Qwen3 嵌入维度
       # 批处理控制（新增）
       - ENABLE_BATCH_PROCESSING=${ENABLE_BATCH_PROCESSING:-false}  # 默认禁用批处理，实现立即处理
-      # 并发控制
-      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-20}
-      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-8}      # 仅在批处理模式下生效
+      # CPU环境并发控制（降低配置）
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-8}   # CPU环境降低并发数
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-4}      # 仅在批处理模式下生效
       - BATCH_TIMEOUT=${BATCH_TIMEOUT:-0.01}     # 仅在批处理模式下生效
-      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-2000}
-      - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-8}
+      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-1000}   # 降低队列大小
+      - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-4}  # CPU环境降低线程数
       - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-300}
       - MAX_RETRIES=${MAX_RETRIES:-3}
       - RETRY_DELAY=${RETRY_DELAY:-1.0}
+    # CPU版本不需要GPU资源配置
     deploy:
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+        limits:
+          memory: 4G  # 限制内存使用
+          cpus: '2.0'  # 限制CPU使用
