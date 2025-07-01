@@ -8,23 +8,25 @@ services:
     restart: unless-stopped
     ports:
       - "${PORT:-6008}:${PORT:-6008}"
-    volumes:
-      - ./models:/app/models  # 持久化存储模型数据
+    # 移除 volumes 挂载，因为模型已经打包在镜像中
     env_file:
       - .env
     environment:
-      - MODEL_PATH=${MODEL_PATH:-/app/models/bge-m3}
+      # Qwen3 模型配置（已打包在镜像中）
+      - MODEL_PATH=${MODEL_PATH:-/app/models/Qwen3-Embedding-4B}
       - DEVICE=${DEVICE:-cuda}  # 如果没有GPU，可以设置为cpu
       - PORT=${PORT:-6008}
       - API_KEY=${API_KEY}
-      - TARGET_DIM=${TARGET_DIM:-2560}
-      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-10}
-      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-32}
-      - BATCH_TIMEOUT=${BATCH_TIMEOUT:-0.1}
-      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-100}
+      # Qwen3 优化配置
+      - TARGET_DIM=${TARGET_DIM:-1536}  # Qwen3 嵌入维度
+      - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-20}
+      - MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-64}
+      - BATCH_TIMEOUT=${BATCH_TIMEOUT:-0.2}
+      - MAX_QUEUE_SIZE=${MAX_QUEUE_SIZE:-2000}
       - THREAD_POOL_SIZE=${THREAD_POOL_SIZE:-8}
-      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-100}
-      - RATE_LIMIT_WINDOW=${RATE_LIMIT_WINDOW:-60}
+      - REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-300}
+      - MAX_RETRIES=${MAX_RETRIES:-5}
+      - RETRY_DELAY=${RETRY_DELAY:-0.5}
     deploy:
       resources:
         reservations:

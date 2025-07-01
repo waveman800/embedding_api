@@ -24,49 +24,68 @@ from sklearn.preprocessing import Normalizer
 from datetime import datetime, timedelta
 import logging
 
-# 配置日志
-logging.basicConfig(level=logging.INFO)
+# 加载 .env 文件
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # 自动加载 .env 文件
+    print("✓ .env 文件加载成功")
+except ImportError:
+    print("⚠️  python-dotenv 未安装，将使用系统环境变量")
+except Exception as e:
+    print(f"⚠️  加载 .env 文件时出错: {e}")
+
+# 配置日志 - 优化输出格式
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
-# 并发控制类
+# 禁用transformers和sentence_transformers的详细日志
+logging.getLogger('transformers').setLevel(logging.WARNING)
+logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+logging.getLogger('torch').setLevel(logging.WARNING)
+
+# 设置环境变量禁用进度条
+os.environ['TRANSFORMERS_NO_ADVISORY_WARNINGS'] = '1'
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'
+
+# 优化的并发控制类 - 支持排队和无错误处理
 class ConcurrencyControl:
-    def __init__(self, max_concurrent: int):
+    def __init__(self, max_concurrent: int, max_queue_size: int = 1000):
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        self.max_concurrent = max_concurrent
+        self.max_queue_size = max_queue_size
         self.active_requests = 0
         self.total_requests = 0
-        self.rejected_requests = 0
+        self.queued_requests = 0
+        self.completed_requests = 0
         self.lock = asyncio.Lock()
+        self.request_queue = asyncio.Queue(maxsize=max_queue_size)
+        self.processing_queue = True
         
-    async def acquire(self):
-        """尝试获取信号量"""
+    async def acquire_with_queue(self):
+        """获取信号量，支持排队等待"""
         async with self.lock:
             self.total_requests += 1
             
-        # 检查是否有可用的信号量
-        if self.semaphore._value > 0:
-            try:
-                # 非阻塞获取信号量
-                await asyncio.wait_for(self.semaphore.acquire(), timeout=0.001)
-                async with self.lock:
-                    self.active_requests += 1
-                return True
-            except asyncio.TimeoutError:
-                async with self.lock:
-                    self.rejected_requests += 1
-                return False
-            except Exception:
-                async with self.lock:
-                    self.rejected_requests += 1
-                return False
-        else:
+        # 直接尝试获取信号量
+        try:
+            await self.semaphore.acquire()
             async with self.lock:
-                self.rejected_requests += 1
+                self.active_requests += 1
+            return True
+        except Exception as e:
+            logger.error(f"Error acquiring semaphore: {e}")
             return False
     
     async def release(self):
         """释放信号量"""
         async with self.lock:
-            self.active_requests -= 1
+            if self.active_requests > 0:
+                self.active_requests -= 1
+            self.completed_requests += 1
         self.semaphore.release()
     
     async def get_stats(self):
@@ -75,8 +94,11 @@ class ConcurrencyControl:
             return {
                 "active_requests": self.active_requests,
                 "total_requests": self.total_requests,
-                "rejected_requests": self.rejected_requests,
-                "available_slots": self.semaphore._value
+                "completed_requests": self.completed_requests,
+                "queued_requests": self.queued_requests,
+                "available_slots": self.semaphore._value,
+                "max_concurrent": self.max_concurrent,
+                "queue_size": self.request_queue.qsize() if hasattr(self.request_queue, 'qsize') else 0
             }
 
 app = FastAPI(title="Embedding API", 
@@ -118,61 +140,60 @@ async def status_check():
             "timestamp": datetime.utcnow().isoformat()
         }
 
-# 并发控制中间件
+# 优化的并发控制中间件 - 支持排队等待，无错误处理
 @app.middleware("http")
 async def concurrency_control_middleware(request: Request, call_next):
     # 跳过健康检查和状态检查
     if request.url.path in ["/health", "/status", "/docs", "/openapi.json"]:
         return await call_next(request)
     
-    # 尝试获取并发控制信号量
+    # 使用优化的并发控制
     if 'concurrency_control' in globals():
-        acquired = await concurrency_control.acquire()
-        if not acquired:
-            # 计算重试延迟（基于当前负载）
-            stats = await concurrency_control.get_stats()
-            retry_after = min(30, max(5, stats["active_requests"] * 2))
-            
-            logger.warning(f"Request rejected due to concurrency limit. Active: {stats['active_requests']}")
-            
-            return JSONResponse(
-                status_code=HTTP_429_TOO_MANY_REQUESTS,
-                content={
-                    "error": "Too Many Requests",
-                    "message": "服务器当前负载过高，请稍后重试",
-                    "retry_after": retry_after,
-                    "active_requests": stats["active_requests"]
-                },
-                headers={"Retry-After": str(retry_after)}
-            )
-        
         try:
-            # 添加请求超时控制
-            response = await asyncio.wait_for(
-                call_next(request), 
-                timeout=float(os.environ.get('REQUEST_TIMEOUT', '60'))
-            )
-            return response
-        except asyncio.TimeoutError:
-            logger.error("Request timeout")
-            return JSONResponse(
-                status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                content={
-                    "error": "Request Timeout",
-                    "message": "请求处理超时，请稍后重试"
-                }
-            )
+            # 获取信号量，支持排队等待
+            acquired = await concurrency_control.acquire_with_queue()
+            if not acquired:
+                logger.error("Failed to acquire concurrency control")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "Internal Server Error",
+                        "message": "服务器内部错误"
+                    }
+                )
+            
+            try:
+                # 执行请求，增加超时时间以适应排队等待
+                response = await asyncio.wait_for(
+                    call_next(request), 
+                    timeout=float(os.environ.get('REQUEST_TIMEOUT', '300'))  # 增加到5分钟
+                )
+                return response
+            except asyncio.TimeoutError:
+                logger.warning("Request timeout after extended wait")
+                return JSONResponse(
+                    status_code=408,  # Request Timeout
+                    content={
+                        "error": "Request Timeout",
+                        "message": "请求处理超时，但已尽力处理"
+                    }
+                )
+            except Exception as e:
+                logger.error(f"Request processing error: {str(e)}")
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "Processing Error",
+                        "message": f"请求处理异常: {str(e)}"
+                    }
+                )
+            finally:
+                await concurrency_control.release()
+                
         except Exception as e:
-            logger.error(f"Request processing error: {str(e)}")
-            return JSONResponse(
-                status_code=HTTP_503_SERVICE_UNAVAILABLE,
-                content={
-                    "error": "Service Error",
-                    "message": "服务处理异常，请稍后重试"
-                }
-            )
-        finally:
-            await concurrency_control.release()
+            logger.error(f"Concurrency control error: {str(e)}")
+            # 即使并发控制失败，也要尝试处理请求
+            return await call_next(request)
     else:
         return await call_next(request)
 
@@ -306,7 +327,12 @@ async def process_batch(batch: List[Tuple[str, asyncio.Future]]) -> None:
         with model_lock:  # 确保模型访问是线程安全的
             embeddings = await loop.run_in_executor(
                 executor,
-                lambda: embeddings_model.encode(texts, convert_to_numpy=True)
+                lambda: embeddings_model.encode(
+                    texts, 
+                    convert_to_numpy=True,
+                    show_progress_bar=False,  # 禁用进度条
+                    batch_size=min(len(texts), 32)  # 优化批处理大小
+                )
             )
         
         # 处理嵌入向量维度
@@ -322,28 +348,34 @@ async def process_batch(batch: List[Tuple[str, asyncio.Future]]) -> None:
 
 
 async def batch_processor():
-    """批量处理请求的协程"""
+    """优化的批量处理协程 - 支持高并发和错误恢复"""
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    
     while True:
         batch = []
         start_time = time.time()
         
         try:
-            # 等待第一个请求
-            item = await request_queue.get()
-            if item is None:  # 退出信号
-                break
-                
-            batch.append(item)
+            # 等待第一个请求，带有超时保护
+            try:
+                item = await asyncio.wait_for(request_queue.get(), timeout=30.0)
+                if item is None:  # 退出信号
+                    break
+                batch.append(item)
+            except asyncio.TimeoutError:
+                # 如果30秒没有请求，继续等待
+                continue
             
-            # 收集一批请求或超时
+            # 收集更多请求，优化批处理效率
             while len(batch) < MAX_BATCH_SIZE:
                 try:
-                    timeout = BATCH_TIMEOUT - (time.time() - start_time)
+                    timeout = max(0.01, BATCH_TIMEOUT - (time.time() - start_time))
                     if timeout <= 0:
                         break
                         
                     item = await asyncio.wait_for(
-                        asyncio.shield(request_queue.get()),
+                        request_queue.get(),
                         timeout=timeout
                     )
                     if item is None:  # 退出信号
@@ -351,18 +383,70 @@ async def batch_processor():
                     batch.append(item)
                 except asyncio.TimeoutError:
                     break
+                except Exception as e:
+                    logger.warning(f"Error collecting batch item: {e}")
+                    break
                     
             # 处理批次
             if batch:
-                await process_batch(batch)
+                batch_size = len(batch)
+                # 只在批次较大时记录日志
+                if batch_size > 5:
+                    logger.info(f"Processing batch: {batch_size} requests")
+                
+                try:
+                    await process_batch(batch)
+                    consecutive_errors = 0  # 重置错误计数
+                    
+                    # 只记录较大批次的处理时间
+                    if batch_size > 10:
+                        processing_time = time.time() - start_time
+                        logger.info(f"Batch completed: {batch_size} requests in {processing_time:.2f}s")
+                    
+                except Exception as e:
+                    consecutive_errors += 1
+                    logger.error(f"Batch error ({consecutive_errors}/{max_consecutive_errors}): {str(e)[:100]}")
+                    
+                    # 处理当前批次的所有请求
+                    for _, future in batch:
+                        if not future.done():
+                            future.set_exception(e)
+                    
+                    # 如果连续错误过多，暂停处理
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.warning(f"Too many errors, pausing for 1s...")
+                        await asyncio.sleep(1.0)
+                        consecutive_errors = 0
                 
         except Exception as e:
-            print(f"Error in batch processor: {e}")
-            # 设置所有future的异常
+            logger.error(f"Critical error in batch processor: {e}")
+            # 处理当前批次的所有请求
             for _, future in batch:
                 if not future.done():
                     future.set_exception(e)
+            
+            # 稍作等待后继续
+            await asyncio.sleep(0.1)
 
+
+async def get_single_embedding(text: str) -> List[float]:
+    """单个文本嵌入处理 - 用于批处理失败时的回退"""
+    try:
+        # 使用线程池处理单个文本
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            executor,
+            lambda: embeddings_model.encode(
+                [text], 
+                normalize_embeddings=True,
+                show_progress_bar=False  # 禁用进度条
+            )
+        )
+        embedding = result[0].tolist()
+        return expand_features(embedding, TARGET_DIM)
+    except Exception as e:
+        logger.error(f"Single embedding processing error: {e}")
+        raise
 
 async def get_embeddings_async(texts: List[str]) -> List[List[float]]:
     """异步获取文本嵌入向量"""
@@ -387,21 +471,71 @@ async def get_embeddings_async(texts: List[str]) -> List[List[float]]:
 
 
 # 从环境变量加载配置
-API_KEY = os.environ.get('API_KEY', '')
-MODEL_PATH = os.environ.get('MODEL_PATH', './models/bge-m3')
-DEVICE = os.environ.get('DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
-PORT = int(os.environ.get('PORT', '6008'))
-TARGET_DIM = int(os.environ.get('TARGET_DIM', '2560'))
+def load_config():
+    """加载并验证配置参数"""
+    config = {}
+    
+    # 基础配置
+    config['API_KEY'] = os.environ.get('API_KEY', '')
+    config['MODEL_PATH'] = os.environ.get('MODEL_PATH', './models/bge-m3')
+    config['DEVICE'] = os.environ.get('DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
+    
+    # 数值配置（带验证）
+    try:
+        config['PORT'] = int(os.environ.get('PORT', '6008'))
+        config['TARGET_DIM'] = int(os.environ.get('TARGET_DIM', '2560'))
+        
+        # 并发控制配置
+        config['MAX_CONCURRENT_REQUESTS'] = int(os.environ.get('MAX_CONCURRENT_REQUESTS', '10'))
+        config['MAX_BATCH_SIZE'] = int(os.environ.get('MAX_BATCH_SIZE', '32'))
+        config['BATCH_TIMEOUT'] = float(os.environ.get('BATCH_TIMEOUT', '0.1'))
+        config['MAX_QUEUE_SIZE'] = int(os.environ.get('MAX_QUEUE_SIZE', '100'))
+        config['THREAD_POOL_SIZE'] = int(os.environ.get('THREAD_POOL_SIZE', '4'))
+        config['MAX_RETRIES'] = int(os.environ.get('MAX_RETRIES', '3'))
+        config['RETRY_DELAY'] = float(os.environ.get('RETRY_DELAY', '1.0'))
+        config['REQUEST_TIMEOUT'] = float(os.environ.get('REQUEST_TIMEOUT', '60'))
+        
+    except ValueError as e:
+        print(f"❌ 配置参数格式错误: {e}")
+        print("请检查 .env 文件中的数值配置")
+        raise
+    
+    # 配置验证
+    if config['PORT'] < 1 or config['PORT'] > 65535:
+        raise ValueError(f"端口号无效: {config['PORT']}，应在 1-65535 范围内")
+    
+    if config['MAX_CONCURRENT_REQUESTS'] < 1:
+        raise ValueError(f"最大并发请求数无效: {config['MAX_CONCURRENT_REQUESTS']}，应大于0")
+    
+    if config['THREAD_POOL_SIZE'] < 1:
+        raise ValueError(f"线程池大小无效: {config['THREAD_POOL_SIZE']}，应大于0")
+    
+    return config
 
-# 并发控制配置
-MAX_CONCURRENT_REQUESTS = int(os.environ.get('MAX_CONCURRENT_REQUESTS', '10'))
-MAX_BATCH_SIZE = int(os.environ.get('MAX_BATCH_SIZE', '32'))
-BATCH_TIMEOUT = float(os.environ.get('BATCH_TIMEOUT', '0.1'))  # 秒
-MAX_QUEUE_SIZE = int(os.environ.get('MAX_QUEUE_SIZE', '100'))
-THREAD_POOL_SIZE = int(os.environ.get('THREAD_POOL_SIZE', '4'))
-MAX_RETRIES = int(os.environ.get('MAX_RETRIES', '3'))
-RETRY_DELAY = float(os.environ.get('RETRY_DELAY', '1.0'))
-REQUEST_TIMEOUT = float(os.environ.get('REQUEST_TIMEOUT', '60'))
+# 加载配置
+try:
+    CONFIG = load_config()
+    
+    # 将配置赋值给全局变量（保持向后兼容）
+    API_KEY = CONFIG['API_KEY']
+    MODEL_PATH = CONFIG['MODEL_PATH']
+    DEVICE = CONFIG['DEVICE']
+    PORT = CONFIG['PORT']
+    TARGET_DIM = CONFIG['TARGET_DIM']
+    MAX_CONCURRENT_REQUESTS = CONFIG['MAX_CONCURRENT_REQUESTS']
+    MAX_BATCH_SIZE = CONFIG['MAX_BATCH_SIZE']
+    BATCH_TIMEOUT = CONFIG['BATCH_TIMEOUT']
+    MAX_QUEUE_SIZE = CONFIG['MAX_QUEUE_SIZE']
+    THREAD_POOL_SIZE = CONFIG['THREAD_POOL_SIZE']
+    MAX_RETRIES = CONFIG['MAX_RETRIES']
+    RETRY_DELAY = CONFIG['RETRY_DELAY']
+    REQUEST_TIMEOUT = CONFIG['REQUEST_TIMEOUT']
+    
+except Exception as e:
+    print(f"❌ 配置加载失败: {e}")
+    print("请检查 .env 文件是否存在且格式正确")
+    print("可以运行 'python setup_env.py' 来创建配置文件")
+    raise
 
 # 请求队列和批处理
 request_queue = asyncio.Queue()
@@ -415,28 +549,83 @@ executor = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE, thread_name_prefix="
 concurrency_control = None
 
 # 打印配置信息
-print("\n=== 配置信息 ===")
-print(f"API_KEY: {'*' * 8}{API_KEY[-4:] if API_KEY else 'None'}")
-print(f"MODEL_PATH: {MODEL_PATH}")
-print(f"DEVICE: {DEVICE}")
-print(f"PORT: {PORT}")
-print(f"TARGET_DIM: {TARGET_DIM}")
-print(f"MAX_CONCURRENT_REQUESTS: {MAX_CONCURRENT_REQUESTS}")
-print(f"MAX_BATCH_SIZE: {MAX_BATCH_SIZE}")
-print(f"REQUEST_TIMEOUT: {REQUEST_TIMEOUT}s")
-print(f"MAX_RETRIES: {MAX_RETRIES}")
-print("================\n")
+def print_config():
+    """打印当前配置信息 - 简化版本"""
+    print("\n" + "="*40)
+    print("🚀 Embedding API Service")
+    print("="*40)
+    
+    # 基础配置
+    api_key_display = f"{'*' * 8}{API_KEY[-4:]}" if API_KEY else "Not Set"
+    print(f"Port: {PORT} | Device: {DEVICE} | Dim: {TARGET_DIM}")
+    print(f"Model: {os.path.basename(MODEL_PATH)}")
+    print(f"API Key: {api_key_display}")
+    
+    # 并发配置
+    print(f"Concurrency: {MAX_CONCURRENT_REQUESTS} | Batch: {MAX_BATCH_SIZE} | Threads: {THREAD_POOL_SIZE}")
+    
+    # 配置来源
+    env_file = os.path.join(os.path.dirname(__file__), '.env')
+    config_source = ".env file" if os.path.exists(env_file) else "environment variables"
+    print(f"Config: {config_source}")
+    
+    print("="*40 + "\n")
+
+# 打印配置
+print_config()
 
 # 全局模型实例
 embeddings_model = None
 
 def load_model():
-    """加载模型"""
+    """加载嵌入模型 - 支持多种模型包括Qwen3"""
     global embeddings_model
     if embeddings_model is None:
-        print(f"Loading model from {MODEL_PATH} using device {DEVICE}")
-        embeddings_model = SentenceTransformer(MODEL_PATH, device=DEVICE)
-        print("Model loaded successfully")
+        print(f"Loading model: {os.path.basename(MODEL_PATH)} on {DEVICE}...")
+        
+        try:
+            # 尝试加载模型
+            if 'qwen' in MODEL_PATH.lower():
+                print("Detected Qwen model, using optimized settings...")
+                # Qwen模型的特殊设置
+                embeddings_model = SentenceTransformer(
+                    MODEL_PATH, 
+                    device=DEVICE,
+                    trust_remote_code=True,  # Qwen模型可能需要这个参数
+                    cache_folder=None  # 避免缓存警告
+                )
+            else:
+                # 默认加载方式
+                embeddings_model = SentenceTransformer(
+                    MODEL_PATH, 
+                    device=DEVICE,
+                    cache_folder=None  # 避免缓存警告
+                )
+            
+            print(f"Model loaded: {type(embeddings_model).__name__}")
+            
+            # 打印模型信息
+            if hasattr(embeddings_model, 'get_sentence_embedding_dimension'):
+                model_dim = embeddings_model.get_sentence_embedding_dimension()
+                print(f"Model embedding dimension: {model_dim}")
+            
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            print("Trying alternative loading method...")
+            try:
+                # 备用加载方法
+                embeddings_model = SentenceTransformer(
+                    MODEL_PATH, 
+                    device=DEVICE,
+                    trust_remote_code=True,
+                    use_auth_token=False,
+                    cache_folder=None  # 避免缓存警告
+                )
+                print("Model loaded (alternative method)")
+            except Exception as e2:
+                print(f"Failed to load model with both methods: {e2}")
+                raise e2
+                
     return embeddings_model
 
 async def startup():
@@ -444,9 +633,12 @@ async def startup():
     global embeddings_model, concurrency_control
     print("正在启动服务...")
     
-    # 初始化并发控制
-    concurrency_control = ConcurrencyControl(MAX_CONCURRENT_REQUESTS)
-    logger.info(f"并发控制初始化完成，最大并发数: {MAX_CONCURRENT_REQUESTS}")
+    # 初始化优化的并发控制
+    concurrency_control = ConcurrencyControl(
+        max_concurrent=MAX_CONCURRENT_REQUESTS,
+        max_queue_size=int(os.environ.get('MAX_QUEUE_SIZE', '1000'))
+    )
+    logger.info(f"Concurrency control initialized: max={MAX_CONCURRENT_REQUESTS}")
     
     load_model()
     # 启动批处理协程

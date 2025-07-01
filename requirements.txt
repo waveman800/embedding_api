@@ -8,3 +8,4 @@ torch>=2.0.0
 pydantic
 starlette
 aiohttp
+python-dotenv
