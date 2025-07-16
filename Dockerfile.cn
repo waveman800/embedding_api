@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     git \
     wget \
+    nvidia-utils-535 \
+    libcudnn8 \
+    libcudnn8-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # 配置pip使用清华镜像
@@ -37,8 +40,32 @@ ENV PORT=6008
 # 设置默认嵌入维度为2560，可以在运行时通过-e参数覆盖
 ENV EMBEDDING_DIMENSION=2560
 
+# 优化多GPU配置
+# 默认使用前两个GPU，可以通过docker run时覆盖
+ENV CUDA_VISIBLE_DEVICES=0,1
+ENV OMP_NUM_THREADS=1
+ENV TOKENIZERS_PARALLELISM=false
+
+# 启用NCCL优化
+ENV NCCL_DEBUG=INFO
+ENV NCCL_IB_DISABLE=0
+ENV NCCL_IB_HCA=mlx5
+ENV NCCL_IB_GID_INDEX=3
+ENV NCCL_SOCKET_IFNAME=eth0
+ENV NCCL_IB_TIMEOUT=22
+
 # 暴露端口
 EXPOSE 6008
+
+# 安装最新版PyTorch与CUDA 12.1兼容的版本
+RUN pip3 install --no-cache-dir torch==2.1.0+cu121 torchvision==0.16.0+cu121 torchaudio==2.1.0 --index-url https://download.pytorch.org/whl/cu121
+
+# 安装xformers等优化库
+RUN pip3 install --no-cache-dir \
+    xformers==0.0.22 \
+    ninja \
+    flash-attn==2.3.0 \
+    triton==2.1.0
 
 # 启动命令
 CMD ["python3", "embedding.py"]

@@ -12,6 +12,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 import tiktoken
 import numpy as np
 from sentence_transformers import SentenceTransformer
+from transformers import AutoModel, AutoTokenizer
 from sklearn.preprocessing import PolynomialFeatures
 from typing import Union
 from sklearn.preprocessing import MinMaxScaler
@@ -96,7 +97,13 @@ async def get_embeddings(request: Union[EmbeddingProcessRequest, EmbeddingQuesti
         return
 
     print(payload)
-    embeddings = [embeddings_model.encode(text) for text in payload]
+    # Process embeddings in batches for better performance
+    batch_size = 24  # Adjust based on your GPU memory
+    embeddings = []
+    for i in range(0, len(payload), batch_size):
+        batch = payload[i:i + batch_size]
+        batch_embeddings = embeddings_model.encode(batch, convert_to_numpy=True)
+        embeddings.extend(batch_embeddings)
     # 从环境变量获取目标维度，默认为2560
     target_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2560'))
     print(f"Using embedding dimension: {target_dimension}")
@@ -128,7 +135,7 @@ async def get_embeddings(request: Union[EmbeddingProcessRequest, EmbeddingQuesti
 
 if __name__ == "__main__":
     # 从环境变量获取配置
-    model_path = os.environ.get('MODEL_PATH', '/app/models/bge-large-zh-v1.5')
+    model_path = os.environ.get('MODEL_PATH', '/app/models/bge-m3')
     device = os.environ.get('DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
     port = int(os.environ.get('PORT', '6008'))
     embedding_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2560'))
@@ -139,8 +146,28 @@ if __name__ == "__main__":
     print(f"服务端口: {port}")
     print(f"嵌入维度: {embedding_dimension}")
     
-    print(f"Loading model from {model_path} using device {device}")
-    embeddings_model = SentenceTransformer(model_path, device=device)
-    print(f"Model loaded successfully, starting server on port {port}")
+    print(f"Loading model from {model_path} with tensor parallelism")
+    
+    # Check available GPUs
+    num_gpus = torch.cuda.device_count()
+    if num_gpus < 2:
+        print(f"Warning: Only {num_gpus} GPU(s) found. For best performance, use at least 2 GPUs.")
+    
+    # Load model with device_map='auto' for tensor parallelism
+    print(f"Using {num_gpus} GPU(s) for tensor parallelism")
+    model = AutoModel.from_pretrained(
+        model_path,
+        device_map="auto",
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        trust_remote_code=True
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    
+    # Initialize SentenceTransformer with the parallelized model
+    embeddings_model = SentenceTransformer(model_path)
+    embeddings_model[0].auto_model = model
+    embeddings_model[0].tokenizer = tokenizer
+    
+    print(f"Model loaded successfully across {num_gpus} GPU(s), starting server on port {port}")
     
     uvicorn.run(app, host='0.0.0.0', port=port, workers=1)

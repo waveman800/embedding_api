@@ -8,7 +8,7 @@
 - 🔧 可配置的嵌入维度（默认2560维）
 - ⚡ 支持批量处理文本
 - 🎯 优化的向量归一化处理
-- 🖥️ 支持 GPU 加速（NVIDIA）
+- 🖥️ 支持多GPU张量并行（NVIDIA）
 - 🔐 简单的 API 认证机制
 - 🧪 完整的测试覆盖
 - 🛠️ 代码质量检查与自动格式化
@@ -20,7 +20,8 @@
 - Python 3.8+
 - pip 或 uv 包管理工具
 - (可选) Docker 19.03+ 和 Docker Compose 1.28+
-- (可选) NVIDIA Container Toolkit（如需 GPU 支持）
+- (GPU 支持) NVIDIA 驱动 >= 535.86.05
+- (多GPU 支持) 至少2个 NVIDIA GPU 卡
 
 ### 1. 克隆仓库
 
@@ -117,12 +118,54 @@ MODEL_PATH=./models/Qwen3-Embedding-4B  # 模型路径
 DEVICE=cuda              # 使用 cuda 或 cpu
 EMBEDDING_DIMENSION=2560 # 嵌入向量维度
 
-# GPU 配置 (可选)
-CUDA_VISIBLE_DEVICES=0   # 指定使用的 GPU 设备号
+# GPU 配置 (多GPU支持)
+CUDA_VISIBLE_DEVICES=0,1   # 指定使用的 GPU 设备号，例如 0,1 表示使用前两个GPU
+BATCH_SIZE=24             # 批处理大小，根据GPU内存调整
+
+# 高级 GPU 配置 (可选)
+NCCL_DEBUG=INFO           # 启用NCCL调试信息
+NCCL_IB_DISABLE=0         # 启用InfiniBand支持
+OMP_NUM_THREADS=1         # 设置OpenMP线程数
 
 # 日志配置
 LOG_LEVEL=INFO          # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
 ```
+
+## 多GPU张量并行支持
+
+### 功能特点
+
+- 🚀 自动将模型张量分布到多个GPU上
+- ⚡ 支持动态批处理，优化GPU利用率
+- 🔧 可配置的GPU设备选择
+- 📊 提供GPU使用情况监控工具
+
+### 使用方法
+
+1. **使用Docker运行** (推荐):
+   ```bash
+   # 使用前两个GPU
+   docker run --gpus all -p 6008:6008 \
+     -e CUDA_VISIBLE_DEVICES=0,1 \
+     -e BATCH_SIZE=24 \
+     -v /path/to/models:/app/models \
+     embedding-api:gpu
+   ```
+
+2. **验证多GPU配置**:
+   ```bash
+   # 进入容器
+   docker exec -it <container_id> bash
+   
+   # 运行GPU检查脚本
+   python check_gpu.py
+   ```
+
+3. **监控GPU使用情况**:
+   ```bash
+   # 在宿主机上执行
+   watch -n 1 nvidia-smi
+   ```
 
 ## API 文档
 
@@ -282,13 +325,34 @@ make clean
 
 - 确保使用 GPU 加速
 - 增加 `docker-compose.yml` 中的 `shm_size` 如果遇到共享内存问题
-- 调整批处理大小以优化吞吐量
+- 调整批处理大小 (`BATCH_SIZE`) 以优化吞吐量
 - 使用 `uv` 替代 `pip` 加速依赖安装
+- 对于多GPU环境，确保 `CUDA_VISIBLE_DEVICES` 正确设置
+- 使用 `check_gpu.py` 脚本验证张量并行是否正常工作
 
 ### 4. API 认证失败
 
 - 检查 `API_KEY` 环境变量是否设置正确
 - 确保请求头中包含正确的 `Authorization: Bearer <API_KEY>`
+
+## 故障排除
+
+### 多GPU相关问题
+
+1. **张量并行未生效**
+   - 运行 `python check_gpu.py` 验证模型是否分布在多个GPU上
+   - 检查 `nvidia-smi` 确认所有目标GPU都被使用
+   - 确保 `CUDA_VISIBLE_DEVICES` 环境变量设置正确
+
+2. **GPU内存不足**
+   - 减小 `BATCH_SIZE` 环境变量
+   - 检查是否有其他进程占用GPU内存
+   - 考虑使用 `torch.cuda.empty_cache()` 清理缓存
+
+3. **NCCL通信问题**
+   - 设置 `NCCL_DEBUG=INFO` 查看详细日志
+   - 确保所有GPU使用相同型号和驱动版本
+   - 检查InfiniBand/RDMA配置（如果使用）
 
 ## 贡献指南
 
