@@ -6,6 +6,9 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 import logging
 from pathlib import Path
+import base64
+from io import BytesIO
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -34,8 +37,16 @@ except Exception as e:
     raise
 
 # Request/Response models
+class ImageInput(BaseModel):
+    type: str = "image"
+    data: str  # Base64 encoded image data
+
+class TextInput(BaseModel):
+    type: str = "text"
+    data: str
+
 class EmbeddingRequest(BaseModel):
-    input: Union[str, List[str]]
+    input: Union[str, List[str], ImageInput, TextInput, List[Union[ImageInput, TextInput]]]
     model: str = "Qwen3-Embedding-4B"
 
 class EmbeddingData(BaseModel):
@@ -60,6 +71,46 @@ async def verify_token(authorization: str = Header(...)):
     return True
 
 # Helper functions
+def decode_base64_image(base64_str: str) -> Image.Image:
+    """Decode base64 image data to PIL Image."""
+    try:
+        # Remove data URI prefix if present
+        if base64_str.startswith('data:image'):
+            base64_str = base64_str.split(',')[1]
+        
+        # Decode base64 string
+        image_data = base64.b64decode(base64_str)
+        
+        # Convert to PIL Image
+        return Image.open(BytesIO(image_data))
+    except Exception as e:
+        logger.error(f"Failed to decode image: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+def process_input(input_data):
+    """Process input data and convert to model-compatible format."""
+    if isinstance(input_data, str):
+        return [input_data]
+    elif isinstance(input_data, list):
+        processed = []
+        for item in input_data:
+            if isinstance(item, str):
+                processed.append(item)
+            elif isinstance(item, dict) or hasattr(item, 'type'):
+                if getattr(item, 'type', item.get('type', '')) == 'text':
+                    processed.append(getattr(item, 'data', item.get('data', '')))
+                elif getattr(item, 'type', item.get('type', '')) == 'image':
+                    image = decode_base64_image(getattr(item, 'data', item.get('data', '')))
+                    processed.append(image)
+        return processed
+    elif isinstance(input_data, dict) or hasattr(input_data, 'type'):
+        if getattr(input_data, 'type', input_data.get('type', '')) == 'text':
+            return [getattr(input_data, 'data', input_data.get('data', ''))]
+        elif getattr(input_data, 'type', input_data.get('type', '')) == 'image':
+            image = decode_base64_image(getattr(input_data, 'data', input_data.get('data', '')))
+            return [image]
+    return []
+
 def expand_features(embedding: np.ndarray, target_length: int) -> np.ndarray:
     """Expand embedding to target length using polynomial features and random projection."""
     if len(embedding) >= target_length:
@@ -101,19 +152,15 @@ async def create_embedding(
     request: EmbeddingRequest,
     _: bool = Depends(verify_token)
 ):
-    """Generate embeddings for the input text(s)."""
+    """Generate embeddings for the input text(s) or image(s)."""
     try:
-        # Encode input text(s)
-        logger.info(f"Generating embeddings for {len(request.input) if isinstance(request.input, list) else 1} text(s)")
-        
-        if isinstance(request.input, str):
-            texts = [request.input]
-        else:
-            texts = request.input
+        # Process input
+        logger.info(f"Processing input...")
+        processed_input = process_input(request.input)
         
         # Generate embeddings
         embeddings = model.encode(
-            texts,
+            processed_input,
             convert_to_numpy=True,
             normalize_embeddings=True,
             show_progress_bar=False
@@ -141,7 +188,14 @@ async def create_embedding(
         # Calculate token usage (approximate)
         import tiktoken
         enc = tiktoken.get_encoding("cl100k_base")
-        total_tokens = sum(len(enc.encode(text)) for text in texts)
+        
+        # For multimodal input, we can only count tokens for text inputs
+        total_tokens = 0
+        for item in processed_input:
+            if isinstance(item, str):
+                total_tokens += len(enc.encode(item))
+            else:  # For images, we don't have a reliable way to count tokens
+                total_tokens += 100  # Approximate token count for images
         
         return {
             "data": response_data,

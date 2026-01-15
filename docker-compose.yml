@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   qwen3-4b-embedding:
     container_name: qwen3-4b-embedding
@@ -10,16 +8,14 @@ services:
       - "6008:6008"
     volumes:
       - ./models:/app/models  # 持久化存储模型数据
-    environment:
-      - MODEL_PATH=/app/models/Qwen3-Embedding-4B
-      - DEVICE=cuda  # 如果没有GPU，可以设置为cpu
-      - PORT=6008
-      - API_KEY=sk-hv6xtPbK183j3RR306Fe23B6196b4d919a8e854887F6213d  # 可以自定义API密钥
-      - EMBEDDING_DIMENSION=2560  # 设置嵌入维度
+      - ./.env:/app/.env  # 挂载环境变量文件
+    # 使用 .env 文件中的环境变量，不需要在这里硬编码
+    env_file:
+      - .env
+    # 增加内存限制，Qwen3-4B模型需要更多内存
     deploy:
       resources:
+        limits:
+          memory: 32G  # 增加到32G以满足大模型的内存需求
         reservations:
-          devices:
-            - driver: nvidia
-              capabilities: [gpu]
-              device_ids: ['6']
+          memory: 16G

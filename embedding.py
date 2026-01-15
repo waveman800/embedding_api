@@ -16,6 +16,9 @@ from sklearn.preprocessing import PolynomialFeatures
 from typing import Union
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import Normalizer
+import base64
+from io import BytesIO
+from PIL import Image
 
 app = FastAPI()
 
@@ -28,13 +31,21 @@ app.add_middleware(
 )
 
 
+class ImageInput(BaseModel):
+    type: str = "image"
+    data: str  # Base64 encoded image data
+
+class TextInput(BaseModel):
+    type: str = "text"
+    data: str
+
 class EmbeddingProcessRequest(BaseModel):
-    input: List[str]
+    input: Union[List[str], List[Union[ImageInput, TextInput]]]
     model: str
 
 
 class EmbeddingQuestionRequest(BaseModel):
-    input: str
+    input: Union[str, ImageInput, TextInput]
     model: str
 
 
@@ -65,6 +76,46 @@ def num_tokens_from_string(string: str) -> int:
     num_tokens = len(encoding.encode(string))
     return num_tokens
 
+def decode_base64_image(base64_str: str) -> Image.Image:
+    """Decode base64 image data to PIL Image."""
+    try:
+        # Remove data URI prefix if present
+        if base64_str.startswith('data:image'):
+            base64_str = base64_str.split(',')[1]
+        
+        # Decode base64 string
+        image_data = base64.b64decode(base64_str)
+        
+        # Convert to PIL Image
+        return Image.open(BytesIO(image_data))
+    except Exception as e:
+        print(f"Failed to decode image: {str(e)}")
+        raise HTTPException(status_code=400, detail="Invalid image data")
+
+def process_input(input_data):
+    """Process input data and convert to model-compatible format."""
+    if isinstance(input_data, str):
+        return [input_data]
+    elif isinstance(input_data, list):
+        processed = []
+        for item in input_data:
+            if isinstance(item, str):
+                processed.append(item)
+            elif isinstance(item, dict) or hasattr(item, 'type'):
+                if getattr(item, 'type', item.get('type', '')) == 'text':
+                    processed.append(getattr(item, 'data', item.get('data', '')))
+                elif getattr(item, 'type', item.get('type', '')) == 'image':
+                    image = decode_base64_image(getattr(item, 'data', item.get('data', '')))
+                    processed.append(image)
+        return processed
+    elif isinstance(input_data, dict) or hasattr(input_data, 'type'):
+        if getattr(input_data, 'type', input_data.get('type', '')) == 'text':
+            return [getattr(input_data, 'data', input_data.get('data', ''))]
+        elif getattr(input_data, 'type', input_data.get('type', '')) == 'image':
+            image = decode_base64_image(getattr(input_data, 'data', input_data.get('data', '')))
+            return [image]
+    return []
+
 def expand_features(embedding, target_length):  #使用了正则来归一向量
     poly = PolynomialFeatures(degree=2)
     expanded_embedding = poly.fit_transform(embedding.reshape(1, -1))
@@ -80,33 +131,45 @@ def expand_features(embedding, target_length):  #使用了正则来归一向量
 
 @app.post("/v1/embeddings", response_model=EmbeddingResponse)
 async def get_embeddings(request: Union[EmbeddingProcessRequest, EmbeddingQuestionRequest]):
-    # data = await request.body()
-    # print(data)
-    # return
     if isinstance(request, EmbeddingProcessRequest):
         print('EmbeddingProcessRequest')
-        payload = request.input
+        input_data = request.input
     elif isinstance(request, EmbeddingQuestionRequest):
         print('EmbeddingQuestionRequest')
-        payload = [request.input]
+        input_data = request.input
     else:
         print('Request')
         data = request.json()
         print(data)
         return
 
-    print(payload)
-    embeddings = [embeddings_model.encode(text) for text in payload]
+    # Process input
+    print(f"Processing input...")
+    processed_input = process_input(input_data)
+    
+    # Generate embeddings
+    embeddings = [embeddings_model.encode(item) for item in processed_input]
+    
     # 从环境变量获取目标维度，默认为2560
     target_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2560'))
     print(f"Using embedding dimension: {target_dimension}")
+    
     # 如果嵌入向量的维度不为目标维度，则扩展至目标维度
     embeddings = [expand_features(embedding, target_dimension) if len(embedding) != target_dimension else embedding for embedding in embeddings]
 
     # 将numpy数组转换为列表
     embeddings = [embedding.tolist() for embedding in embeddings]
-    prompt_tokens = sum(len(text.split()) for text in payload)
-    total_tokens = sum(num_tokens_from_string(text) for text in payload)
+    
+    # Calculate token usage (approximate)
+    prompt_tokens = 0
+    total_tokens = 0
+    for item in processed_input:
+        if isinstance(item, str):
+            prompt_tokens += len(item.split())
+            total_tokens += num_tokens_from_string(item)
+        else:  # For images
+            prompt_tokens += 100  # Approximate word count for images
+            total_tokens += 100  # Approximate token count for images
 
     response = {
         "data": [
@@ -143,4 +206,4 @@ if __name__ == "__main__":
     embeddings_model = SentenceTransformer(model_path, device=device)
     print(f"Model loaded successfully, starting server on port {port}")
     
-    uvicorn.run(app, host='0.0.0.0', port=port, workers=1)
+    uvicorn.run(app, host='0.0.0.0', port=port)

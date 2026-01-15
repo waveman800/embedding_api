@@ -1,44 +1,32 @@
-#FROM nvidia/cuda:12.1.0-cudnn9-devel-ubuntu22.04
-FROM ccr.ccs.tencentyun.com/waveman/ubuntu-gpu:cuda12.1.0-cudnn8-python3.10-amd64
+FROM ccr.ccs.tencentyun.com/waveman/python:3.12-slim
 
 # 设置时区
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-
-# 使用清华Ubuntu镜像源
-RUN sed -i 's@//.*archive.ubuntu.com@//mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list \
-    && sed -i 's/security.ubuntu.com/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list
-
-# 安装基础依赖
-RUN apt-get update && apt-get install -y \
-    python3 \
-    python3-pip \
-    git \
-    wget \
-    && rm -rf /var/lib/apt/lists/*
-
-# 配置pip使用清华镜像
-RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-    && pip3 config set install.trusted-host pypi.tuna.tsinghua.edu.cn
 
 # 创建工作目录
 WORKDIR /app
 
 # 复制应用文件
 COPY embedding.py requirements.txt /app/
+COPY embedding_api/ /app/embedding_api/
 
-# 安装依赖
-RUN pip3 install --no-cache-dir -r requirements.txt
+# 安装依赖（使用--break-system-packages允许在Docker中安装，并使用清华镜像源）
+# 使用CPU版本的PyTorch索引
+RUN pip3 install --no-cache-dir --break-system-packages \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple/ \
+    --trusted-host pypi.tuna.tsinghua.edu.cn \
+    --extra-index-url https://download.pytorch.org/whl/cpu \
+    -r requirements.txt
 
-# 设置环境变量
-ENV MODEL_PATH=/app/models/Qwen3-Embedding-4B
-ENV DEVICE=cuda
-ENV PORT=6008
-# 设置默认嵌入维度为2560，可以在运行时通过-e参数覆盖
-ENV EMBEDDING_DIMENSION=2560
+# 环境变量将从 .env 文件和 docker-compose.yml 中获取
+# 不需要在这里硬编码环境变量
 
 # 暴露端口
 EXPOSE 6008
 
 # 启动命令
-CMD ["python3", "embedding.py"]
+# 使用多进程模式，workers数量从环境变量中获取
+# 这样可以更灵活地配置并发数，而不需要修改Dockerfile
+CMD sh -c 'uvicorn embedding_api.main:app --host 0.0.0.0 --port ${PORT:-6008} --workers ${WORKERS:-4}'
+
