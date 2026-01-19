@@ -5,7 +5,7 @@
 ## 功能特性
 
 - 🚀 支持 Qwen3-VL-Embedding-2B 多模态模型
-- 🔧 可配置的嵌入维度（默认2560维）
+- 🔧 动态嵌入维度检测（自动适配模型实际输出）
 - ⚡ 支持批量处理文本和图片
 - 🖼️ 支持图片URL输入
 - 🎨 支持图片base64格式输入
@@ -87,7 +87,7 @@ PORT=6008                                     # 服务端口
 MODEL_NAME=Qwen3-VL-Embedding-2B              # 模型名称
 MODEL_PATH=./models/Qwen3-VL-Embedding-2B     # 模型路径
 DEVICE=cuda                                    # 使用 cuda 或 cpu
-EMBEDDING_DIMENSION=2560                      # 嵌入向量维度
+# EMBEDDING_DIMENSION=2560                    # 嵌入向量维度（可选，默认自动检测）
 
 # GPU 配置 (可选)
 CUDA_VISIBLE_DEVICES=1                         # 指定使用的 GPU 设备号
@@ -117,7 +117,7 @@ GET /health
     "model_path": "./models/Qwen3-VL-Embedding-2B",
     "device": "cuda",
     "cuda_available": true,
-    "embedding_dimension": 2560,
+    "embedding_dimension": 2048,
     "max_image_width": 512,
     "max_image_height": 512
 }
@@ -248,7 +248,14 @@ python -m uvicorn embedding_api.main:app --host 0.0.0.0 --port 6008 --log-level 
 
 ### 自定义嵌入维度
 
-在 `.env` 中修改 `EMBEDDING_DIMENSION` 环境变量（默认2560）。
+默认情况下，系统会自动检测模型的实际输出维度（Qwen3-VL-Embedding-2B 模型为 2048 维）。
+
+如果需要将嵌入向量扩展到特定维度，可以在 `.env` 中设置 `EMBEDDING_DIMENSION` 环境变量：
+
+```bash
+# 示例：将嵌入向量扩展到 2048 维
+EMBEDDING_DIMENSION=2048
+```
 
 ### 使用其他模型
 

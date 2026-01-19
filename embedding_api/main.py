@@ -39,7 +39,9 @@ if not MODEL_PATH:
     logger.info(f"Using fallback MODEL_PATH: {MODEL_PATH}")
 DEVICE = os.getenv("DEVICE", "cuda" if os.getenv("CUDA_VISIBLE_DEVICES") else "cpu")
 API_KEY = os.getenv("API_KEY")
-EMBEDDING_DIMENSION = int(os.getenv("EMBEDDING_DIMENSION", "2560"))
+
+# Dynamic embedding dimension (will be determined automatically from model output)
+EMBEDDING_DIMENSION = None
 
 # Image processing configuration
 MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE", "512"))
@@ -387,6 +389,9 @@ def generate_embedding(input_item, processor, model, device):
             except Exception as e:
                 logger.error(f"Error normalizing embedding: {e}, using unnormalized embedding")
         
+        # Log actual embedding dimension
+        logger.info(f"Actual generated embedding dimension: {len(embedding)}")
+        
         return embedding
     except Exception as e:
         logger.error(f"Failed to generate embedding: {str(e)}")
@@ -425,19 +430,31 @@ async def create_embedding(
         embedding_generation_time = time.time() - embed_start
         logger.info(f"Embeddings generated in {embedding_generation_time:.4f} seconds")
         
-        # Expand to target dimension if needed
-        if embeddings.shape[1] != EMBEDDING_DIMENSION:
-            logger.info(f"Expanding embeddings from {embeddings.shape[1]} to {EMBEDDING_DIMENSION} dimensions")
+        # Dynamic embedding dimension - update global EMBEDDING_DIMENSION from actual output
+        global EMBEDDING_DIMENSION
+        actual_dimension = embeddings.shape[1]
+        if EMBEDDING_DIMENSION is None:
+            EMBEDDING_DIMENSION = actual_dimension
+            logger.info(f"Set dynamic EMBEDDING_DIMENSION to: {EMBEDDING_DIMENSION}")
+        elif EMBEDDING_DIMENSION != actual_dimension:
+            logger.warning(f"Configured EMBEDDING_DIMENSION ({EMBEDDING_DIMENSION}) doesn't match actual model output ({actual_dimension}). Using actual dimension.")
+            EMBEDDING_DIMENSION = actual_dimension
+        
+        # Expand to target dimension if needed (only if explicitly configured)
+        configured_dimension = int(os.getenv("EMBEDDING_DIMENSION", "-1"))
+        if configured_dimension > 0 and configured_dimension != actual_dimension:
+            logger.info(f"Expanding embeddings from {actual_dimension} to {configured_dimension} dimensions (explicitly configured)")
             expand_start = time.time()
             
             expanded_embeddings = []
             for emb in embeddings:
-                expanded = expand_features(emb, EMBEDDING_DIMENSION)
+                expanded = expand_features(emb, configured_dimension)
                 expanded_embeddings.append(expanded)
             embeddings = np.array(expanded_embeddings)
             
             expansion_time = time.time() - expand_start
             logger.info(f"Embeddings expanded in {expansion_time:.4f} seconds")
+            EMBEDDING_DIMENSION = configured_dimension
         
         # Prepare response
         response_data = [
