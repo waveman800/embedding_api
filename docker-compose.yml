@@ -1,6 +1,6 @@
 services:
-  qwen3-4b-embedding:
-    container_name: qwen3-4b-embedding
+  qwen3-embedding:
+    container_name: qwen3-vl-2b-embedding
     build:
       context: .
       dockerfile: Dockerfile.cn

@@ -1,6 +1,10 @@
 # Core dependencies
 fastapi>=0.104.0
-sentence-transformers>=2.7.0
+transformers>=4.36.0
+torch>=2.0.0
+torchvision>=0.15.0
+sentence-transformers>=2.2.0
+accelerate>=0.26.0
 tiktoken>=0.5.1
 uvicorn[standard]>=0.23.2
 numpy>=1.24.0
@@ -10,3 +14,4 @@ python-dotenv>=1.0.0
 starlette
 Pillow>=10.0.0
 requests>=2.31.0
+accelerate
