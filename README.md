@@ -26,7 +26,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/waveman800/embedding_api.git
 cd embedding_api
 ```
 
@@ -87,7 +87,7 @@ PORT=6008                                     # 服务端口
 MODEL_NAME=Qwen3-VL-Embedding-2B              # 模型名称
 MODEL_PATH=./models/Qwen3-VL-Embedding-2B     # 模型路径
 DEVICE=cuda                                    # 使用 cuda 或 cpu
-# EMBEDDING_DIMENSION=2560                    # 嵌入向量维度（可选，默认自动检测）
+# EMBEDDING_DIMENSION=2048                   # 嵌入向量维度（可选，默认自动检测）
 
 # GPU 配置 (可选)
 CUDA_VISIBLE_DEVICES=1                         # 指定使用的 GPU 设备号
