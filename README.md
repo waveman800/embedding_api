@@ -26,7 +26,7 @@
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/waveman800/embedding_api.git
+git clone https://code.bhidi.com/digital-technology-institute/rdc/cloud/ai/embedding_api.git
 cd embedding_api
 ```
 
@@ -243,7 +243,7 @@ python -m uvicorn embedding_api.main:app --host 0.0.0.0 --port 6008 --log-level 
 
 ```bash
 # 停止现有容器并重新启动（使用4个worker进程，指定GPU 1）
-cd /home/devuser/lxn/dev/embedding_api && docker compose down && WORKERS=4 CUDA_VISIBLE_DEVICES=1 docker compose up -d
+cd embedding_api && docker compose down && WORKERS=4 CUDA_VISIBLE_DEVICES=1 docker compose up -d
 
 # 使用默认配置启动（1个worker进程，GPU 0）
 docker compose up -d
