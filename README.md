@@ -237,6 +237,25 @@ python -m uvicorn embedding_api.main:app --host 0.0.0.0 --port 6008 --log-level 
 
 ## 部署
 
+### Docker 部署（推荐）
+
+使用 Docker Compose 快速部署服务：
+
+```bash
+# 停止现有容器并重新启动（使用4个worker进程，指定GPU 1）
+cd /home/devuser/lxn/dev/embedding_api && docker compose down && WORKERS=4 CUDA_VISIBLE_DEVICES=1 docker compose up -d
+
+# 使用默认配置启动（1个worker进程，GPU 0）
+docker compose up -d
+
+# 自定义worker数量和GPU设备
+WORKERS=2 CUDA_VISIBLE_DEVICES=0 docker compose up -d
+```
+
+**环境变量说明**：
+- `WORKERS`: 指定 worker 进程数量（默认：1）
+- `CUDA_VISIBLE_DEVICES`: 指定使用的 GPU 设备号（默认：0）
+
 ### 生产环境部署建议
 
 1. 使用进程管理工具（如 systemd 或 supervisor）管理服务
