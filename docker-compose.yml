@@ -23,7 +23,3 @@ services:
           memory: 32G  # 增加到32G以满足大模型的内存需求
         reservations:
           memory: 16G
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
