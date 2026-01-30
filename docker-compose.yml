@@ -12,6 +12,10 @@ services:
     # 使用 .env 文件中的环境变量，不需要在这里硬编码
     env_file:
       - .env
+    # 支持命令行传递的环境变量
+    environment:
+      - WORKERS=${WORKERS:-1}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
     # 增加内存限制，Qwen3-4B模型需要更多内存
     deploy:
       resources:
@@ -19,3 +23,7 @@ services:
           memory: 32G  # 增加到32G以满足大模型的内存需求
         reservations:
           memory: 16G
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

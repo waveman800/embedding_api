@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel, Field
 from typing import List, Union, Optional
 import numpy as np
-from transformers import AutoModel, AutoTokenizer, Qwen3VLProcessor, Qwen3VLForConditionalGeneration
+from transformers import Qwen3VLProcessor
 import logging
 from pathlib import Path
 import base64
@@ -14,7 +14,10 @@ import requests
 from typing import Dict, Any
 import time
 import torch
-import concurrent.futures
+import torch.nn.functional as F
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../models/Qwen3-VL-Embedding-2B/scripts'))
+from qwen3_vl_embedding import Qwen3VLForEmbedding
 
 # Load .env file if it exists
 load_dotenv()
@@ -70,10 +73,11 @@ try:
     processor = Qwen3VLProcessor.from_pretrained(MODEL_PATH)
     
     logger.info(f"Loading model for {MODEL_NAME}...")
-    model = Qwen3VLForConditionalGeneration.from_pretrained(
+    model = Qwen3VLForEmbedding.from_pretrained(
         MODEL_PATH,
         torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
-        device_map="auto" if DEVICE == "cuda" else None
+        device_map="auto" if DEVICE == "cuda" else None,
+        trust_remote_code=True
     )
     model.to(DEVICE)
     model.eval()
@@ -304,7 +308,7 @@ async def health_check():
     }
 
 def generate_embedding(input_item, processor, model, device):
-    """Generate embedding for a single input item (text or image)."""
+    """Generate embedding for a single input item (text or image) using official pooling method."""
     try:
         if isinstance(input_item, str):
             # Text input
@@ -330,55 +334,30 @@ def generate_embedding(input_item, processor, model, device):
             truncation=True
         ).to(device)
         
-        # Generate embedding by extracting hidden state
+        # Generate embedding using official pooling method
         with torch.no_grad():
-            # For Qwen3-VL, we need to handle it differently since it's a generative model
-            # Try to get hidden states from the encoder if available
-            if hasattr(model, 'encoder'):
-                # If model has separate encoder, use encoder outputs
-                if 'pixel_values' in inputs:
-                    # Image input - pass through encoder
-                    encoder_outputs = model.encoder(pixel_values=inputs.get('pixel_values'), 
-                                                 input_ids=inputs.get('input_ids'),
-                                                 attention_mask=inputs.get('attention_mask'))
-                    hidden_states = encoder_outputs.last_hidden_state
-                else:
-                    # Text input - pass through encoder
-                    encoder_outputs = model.encoder(input_ids=inputs.get('input_ids'),
-                                                 attention_mask=inputs.get('attention_mask'))
-                    hidden_states = encoder_outputs.last_hidden_state
-            else:
-                # Fallback to full model forward pass
-                outputs = model(**inputs, output_hidden_states=True)
-                
-                # Get hidden states from a middle layer (not just the last one)
-                # For better embeddings, use a layer that captures semantic information
-                if outputs.hidden_states:
-                    layer_idx = len(outputs.hidden_states) // 2  # Use middle layer
-                    hidden_states = outputs.hidden_states[layer_idx]
-                else:
-                    # Fallback to last hidden state if available
-                    hidden_states = outputs.hidden_states[-1] if hasattr(outputs, 'hidden_states') else outputs.last_hidden_state
+            outputs = model(**inputs)
             
-            # Average pooling with attention mask
+            # Use official pooling method: extract the last valid token
+            # This is the key difference from average pooling
             if 'attention_mask' in inputs and inputs['attention_mask'] is not None:
-                # Mask out padding tokens
-                mask = inputs['attention_mask'].unsqueeze(-1).expand(hidden_states.size()).float()
-                masked_hidden_states = hidden_states * mask
-                sum_hidden = torch.sum(masked_hidden_states, dim=1)
-                sum_mask = torch.sum(mask, dim=1)
-                # Avoid division by zero
-                sum_mask = torch.clamp(sum_mask, min=1e-9)
-                embedding = (sum_hidden / sum_mask).squeeze().cpu().numpy()
+                # Find the last non-padding token for each sequence
+                attention_mask = inputs['attention_mask']
+                # Flip the mask and find the first 1 (which corresponds to the last 1 in original)
+                flipped_mask = attention_mask.flip(dims=[1])
+                last_token_indices = flipped_mask.argmax(dim=1)
+                # Calculate the actual column indices
+                col_indices = attention_mask.shape[1] - last_token_indices - 1
+                # Create row indices
+                row_indices = torch.arange(outputs.last_hidden_state.shape[0], device=device)
+                # Extract embeddings for the last valid tokens
+                embedding = outputs.last_hidden_state[row_indices, col_indices].squeeze().cpu().numpy()
             else:
-                # Simple average pooling if no attention mask
-                embedding = torch.mean(hidden_states, dim=1).squeeze().cpu().numpy()
-            
-
+                # Fallback: use the last token if no attention mask
+                embedding = outputs.last_hidden_state[:, -1, :].squeeze().cpu().numpy()
             
             # Normalize embedding with overflow protection
             try:
-                # Use a safer normalization approach
                 norm = np.linalg.norm(embedding)
                 logger.debug(f"Embedding norm: {norm}")
                 if norm > 0 and not np.isinf(norm) and not np.isnan(norm):
@@ -395,6 +374,8 @@ def generate_embedding(input_item, processor, model, device):
         return embedding
     except Exception as e:
         logger.error(f"Failed to generate embedding: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to generate embedding: {str(e)}")
 
 
