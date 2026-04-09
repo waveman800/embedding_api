@@ -1,5 +1,6 @@
-# Model directories
-models/
+# Model directories (keep structure but ignore files)
+models/*
+!models/.gitkeep
 
 # Python
 __pycache__/
@@ -43,3 +44,14 @@ wheels/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Docker images
+*.tar.gz
+*.tar.gz.md5
+
+# Cache
+cache/
+
+# Environment (keep example)
+.env
+!.env.example

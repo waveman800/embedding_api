@@ -1,0 +1,55 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Models (will be downloaded in container)
+models/*
+!models/.gitkeep
+
+# Logs
+*.log
+logs/
+
+# Test files
+test_*.py
+*_test.py
+
+# Documentation
+*.md
+!README.md
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Misc
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp

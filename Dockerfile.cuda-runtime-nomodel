@@ -1,0 +1,52 @@
+# CUDA Runtime Dockerfile - 模型外挂版本
+# 模型通过挂载方式加载，环境变量通过 .env 文件配置
+
+FROM ccr.ccs.tencentyun.com/waveman/cuda:12.4.1-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# 更换 apt 源为国内镜像
+RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
+    sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3-pip \
+    git \
+    wget \
+    curl \
+    libgomp1 \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# 创建模型目录（挂载点）
+RUN mkdir -p /app/models
+
+# 复制依赖文件
+COPY requirements.txt /app/
+
+# 安装 Python 依赖（CUDA 版本）
+RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+    pip3 config set global.trusted-host mirrors.aliyun.com && \
+    pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements.txt && \
+    pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
+    pip3 install --no-cache-dir modelscope transformers accelerate pillow python-dotenv
+
+# 复制应用文件
+COPY embedding.py /app/
+
+# 复制默认 .env 文件（会被挂载的 .env 覆盖）
+COPY .env.example /app/.env
+
+# 设置默认环境变量（可在 .env 中覆盖）
+ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:1024
+
+EXPOSE 6008
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:6008/health || exit 1
+
+# 启动时检查模型是否存在
+CMD ["bash", "-c", "if [ ! -d /app/models/Qwen3-VL-Embedding-2B ] || [ -z \"$(ls -A /app/models/Qwen3-VL-Embedding-2B)\" ]; then echo 'Error: Model not found at /app/models/Qwen3-VL-Embedding-2B'; echo 'Please mount the model directory:'; echo '  docker run -v /path/to/model:/app/models/Qwen3-VL-Embedding-2B ...'; exit 1; fi; python3 embedding.py"]

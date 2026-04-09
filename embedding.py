@@ -3,22 +3,24 @@ import time
 import torch
 import uvicorn
 import os
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-from typing import List
-from fastapi import FastAPI, Depends, HTTPException, Request
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, HTTPException, Request, Depends
 from starlette.status import HTTP_401_UNAUTHORIZED
-import tiktoken
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from sklearn.preprocessing import PolynomialFeatures
-from typing import Union
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.preprocessing import Normalizer
-import base64
-from io import BytesIO
 from PIL import Image
+from io import BytesIO
+import base64
+from typing import Union
+from transformers import AutoProcessor, AutoModel
+
+# 加载 .env 文件（如果存在）
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 app = FastAPI()
 
@@ -31,50 +33,47 @@ app.add_middleware(
 )
 
 
-class ImageInput(BaseModel):
-    type: str = "image"
-    data: str  # Base64 encoded image data
-
-class TextInput(BaseModel):
-    type: str = "text"
-    data: str
-
-class EmbeddingProcessRequest(BaseModel):
-    input: Union[List[str], List[Union[ImageInput, TextInput]]]
-    model: str
-
-
-class EmbeddingQuestionRequest(BaseModel):
-    input: Union[str, ImageInput, TextInput]
-    model: str
+# 请求模型
+class EmbeddingRequest(BaseModel):
+    input: Union[str, List[str], Dict[str, Any], List[Dict[str, Any]]]
+    model: str = "Qwen3-VL-Embedding-2B"
 
 
 class EmbeddingResponse(BaseModel):
-    data: list
+    data: List[Dict[str, Any]]
     model: str
     object: str
-    usage: dict
+    usage: Dict[str, int]
 
 
-async def verify_token(request: Request):
-    auth_header = request.headers.get('Authorization')
-    # 从环境变量获取API密钥，如果未设置则使用默认值
-    api_key = os.environ.get('API_KEY', 'sk-hv6xtPbK183j3RR306Fe23B6196b4d919a8e854887F6213d')
-    if auth_header:
-        token_type, _, token = auth_header.partition(' ')
-        if token_type.lower() == "bearer" and token == api_key:
-            return True
-    raise HTTPException(
-        status_code=HTTP_401_UNAUTHORIZED,
-        detail="Invalid authorization credentials",
+# 全局模型变量
+processor = None
+model = None
+
+
+def load_model():
+    """加载 Qwen3-VL-Embedding-2B 模型"""
+    global processor, model
+    
+    model_path = os.environ.get('MODEL_PATH', '/app/models/Qwen3-VL-Embedding-2B')
+    device = os.environ.get('DEVICE', 'cpu')
+    
+    print(f"Loading Qwen3-VL-Embedding-2B from {model_path}")
+    print(f"Device: {device}")
+    
+    # 加载处理器和模型
+    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    model = AutoModel.from_pretrained(
+        model_path, 
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
+        device_map=device
     )
+    model.eval()
+    
+    print("Model loaded successfully!")
+    return processor, model
 
-
-def num_tokens_from_string(string: str) -> int:
-    """Returns the number of tokens in a text string."""
-    encoding = tiktoken.get_encoding('cl100k_base')
-    num_tokens = len(encoding.encode(string))
-    return num_tokens
 
 def decode_base64_image(base64_str: str) -> Image.Image:
     """Decode base64 image data to PIL Image."""
@@ -87,123 +86,226 @@ def decode_base64_image(base64_str: str) -> Image.Image:
         image_data = base64.b64decode(base64_str)
         
         # Convert to PIL Image
-        return Image.open(BytesIO(image_data))
+        return Image.open(BytesIO(image_data)).convert('RGB')
     except Exception as e:
         print(f"Failed to decode image: {str(e)}")
         raise HTTPException(status_code=400, detail="Invalid image data")
 
-def process_input(input_data):
-    """Process input data and convert to model-compatible format."""
-    if isinstance(input_data, str):
-        return [input_data]
-    elif isinstance(input_data, list):
-        processed = []
-        for item in input_data:
-            if isinstance(item, str):
-                processed.append(item)
-            elif isinstance(item, dict) or hasattr(item, 'type'):
-                if getattr(item, 'type', item.get('type', '')) == 'text':
-                    processed.append(getattr(item, 'data', item.get('data', '')))
-                elif getattr(item, 'type', item.get('type', '')) == 'image':
-                    image = decode_base64_image(getattr(item, 'data', item.get('data', '')))
-                    processed.append(image)
-        return processed
-    elif isinstance(input_data, dict) or hasattr(input_data, 'type'):
-        if getattr(input_data, 'type', input_data.get('type', '')) == 'text':
-            return [getattr(input_data, 'data', input_data.get('data', ''))]
-        elif getattr(input_data, 'type', input_data.get('type', '')) == 'image':
-            image = decode_base64_image(getattr(input_data, 'data', input_data.get('data', '')))
-            return [image]
-    return []
 
-def expand_features(embedding, target_length):  #使用了正则来归一向量
-    poly = PolynomialFeatures(degree=2)
-    expanded_embedding = poly.fit_transform(embedding.reshape(1, -1))
-    expanded_embedding = expanded_embedding.flatten()
-    if len(expanded_embedding) > target_length:
-        expanded_embedding = expanded_embedding[:target_length]
-    elif len(expanded_embedding) < target_length:
-        expanded_embedding = np.pad(expanded_embedding, (0, target_length - len(expanded_embedding)))
-    normalizer = Normalizer(norm='l2')
-    expanded_embedding = normalizer.transform(expanded_embedding.reshape(1, -1)).flatten()
-    return expanded_embedding
-
-
-@app.post("/v1/embeddings", response_model=EmbeddingResponse)
-async def get_embeddings(request: Union[EmbeddingProcessRequest, EmbeddingQuestionRequest]):
-    if isinstance(request, EmbeddingProcessRequest):
-        print('EmbeddingProcessRequest')
-        input_data = request.input
-    elif isinstance(request, EmbeddingQuestionRequest):
-        print('EmbeddingQuestionRequest')
-        input_data = request.input
-    else:
-        print('Request')
-        data = request.json()
-        print(data)
-        return
-
-    # Process input
-    print(f"Processing input...")
-    processed_input = process_input(input_data)
+def process_input_item(item):
+    """处理单个输入项，返回 (text, image) 元组"""
+    text = None
+    image = None
     
-    # Generate embeddings
-    embeddings = [embeddings_model.encode(item) for item in processed_input]
+    if isinstance(item, str):
+        # 纯文本
+        text = item
+    elif isinstance(item, dict):
+        # 字典格式
+        item_type = item.get('type', 'text')
+        if item_type == 'text':
+            text = item.get('data', '')
+        elif item_type == 'image':
+            image = decode_base64_image(item.get('data', ''))
     
-    # 从环境变量获取目标维度，默认为2560
-    target_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2560'))
-    print(f"Using embedding dimension: {target_dimension}")
-    
-    # 如果嵌入向量的维度不为目标维度，则扩展至目标维度
-    embeddings = [expand_features(embedding, target_dimension) if len(embedding) != target_dimension else embedding for embedding in embeddings]
+    return text, image
 
-    # 将numpy数组转换为列表
-    embeddings = [embedding.tolist() for embedding in embeddings]
-    
-    # Calculate token usage (approximate)
-    prompt_tokens = 0
-    total_tokens = 0
-    for item in processed_input:
-        if isinstance(item, str):
-            prompt_tokens += len(item.split())
-            total_tokens += num_tokens_from_string(item)
-        else:  # For images
-            prompt_tokens += 100  # Approximate word count for images
-            total_tokens += 100  # Approximate token count for images
 
-    response = {
-        "data": [
-            {
-                "embedding": embedding,
-                "index": index,
-                "object": "embedding"
-            } for index, embedding in enumerate(embeddings)
-        ],
-        "model": request.model,
-        "object": "list",
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "total_tokens": total_tokens,
-        }
+def get_embedding_for_text(text: str) -> np.ndarray:
+    """为文本生成嵌入向量"""
+    global processor, model
+    
+    # 处理输入
+    inputs = processor(
+        text=[text],
+        return_tensors="pt",
+        padding=True,
+        truncation=True
+    )
+    
+    # 移动到设备
+    device = next(model.parameters()).device
+    inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in inputs.items()}
+    
+    # 生成嵌入
+    with torch.no_grad():
+        outputs = model(**inputs)
+        # 使用 mean pooling
+        if hasattr(outputs, 'last_hidden_state'):
+            embedding = outputs.last_hidden_state.mean(dim=1)[0]
+        elif hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
+            embedding = outputs.pooler_output[0]
+        else:
+            embedding = outputs[0][0]
+    
+    # 转换为 numpy
+    embedding = embedding.cpu().numpy()
+    
+    return embedding
+
+
+async def verify_token(request: Request):
+    auth_header = request.headers.get('Authorization')
+    api_key = os.environ.get('API_KEY', 'sk-hv6xtPbK183j3RR306Fe23B6196b4d919a8e854887F6213d')
+    if auth_header:
+        token_type, _, token = auth_header.partition(' ')
+        if token_type.lower() == "bearer" and token == api_key:
+            return True
+    raise HTTPException(
+        status_code=HTTP_401_UNAUTHORIZED,
+        detail="Invalid authorization credentials",
+    )
+
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint."""
+    return {
+        "status": "healthy",
+        "model": os.environ.get('MODEL_PATH', 'unknown'),
+        "device": os.environ.get('DEVICE', 'cpu'),
+        "version": "1.0.0",
+        "model_type": "Qwen3-VL-Embedding-2B",
+        "model_loaded": model is not None
     }
 
-    return response
+
+@app.get("/")
+async def root():
+    """Root endpoint with API info."""
+    return {
+        "name": "Embedding API",
+        "version": "1.0.0",
+        "endpoints": {
+            "embeddings": "/v1/embeddings",
+            "health": "/health"
+        },
+        "model": "Qwen3-VL-Embedding-2B",
+        "device": os.environ.get('DEVICE', 'cpu'),
+        "dimension": int(os.environ.get('EMBEDDING_DIMENSION', '2048'))
+    }
+
+
+@app.post("/v1/embeddings")
+async def get_embeddings(request: EmbeddingRequest, authorized: bool = Depends(verify_token)):
+    global processor, model
+    
+    if processor is None or model is None:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        # 处理输入数据
+        input_data = request.input
+        
+        # 统一转换为列表
+        if isinstance(input_data, str):
+            # 单条文本
+            texts = [input_data]
+        elif isinstance(input_data, list):
+            # 列表格式
+            texts = []
+            for item in input_data:
+                if isinstance(item, str):
+                    texts.append(item)
+                elif isinstance(item, dict):
+                    # 处理 dict 类型，提取文本
+                    item_type = item.get('type', 'text')
+                    if item_type == 'text':
+                        texts.append(item.get('data', ''))
+                    else:
+                        # 暂时不支持图像，使用空文本
+                        texts.append('')
+                else:
+                    texts.append(str(item))
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported input type: {type(input_data)}")
+        
+        # 生成嵌入
+        embeddings = []
+        total_tokens = 0
+        
+        for text in texts:
+            # 计算近似 token 数 (简单分词)
+            tokens = len(text.split())
+            total_tokens += tokens
+            
+            # 生成嵌入
+            embedding = get_embedding_for_text(text)
+            embeddings.append(embedding)
+        
+        # 获取目标维度
+        target_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2048'))
+        
+        # 调整维度并归一化
+        processed_embeddings = []
+        for embedding in embeddings:
+            # 调整维度
+            if len(embedding) != target_dimension:
+                if len(embedding) > target_dimension:
+                    embedding = embedding[:target_dimension]
+                else:
+                    embedding = np.pad(embedding, (0, target_dimension - len(embedding)))
+            
+            # L2 归一化
+            norm_val = np.linalg.norm(embedding)
+            if norm_val > 0:
+                embedding = embedding / norm_val
+            
+            processed_embeddings.append(embedding.tolist())
+        
+        # 构建响应
+        response_data = {
+            "data": [
+                {
+                    "embedding": emb,
+                    "index": idx,
+                    "object": "embedding"
+                } for idx, emb in enumerate(processed_embeddings)
+            ],
+            "model": request.model,
+            "object": "list",
+            "usage": {
+                "prompt_tokens": total_tokens,
+                "total_tokens": total_tokens
+            }
+        }
+        
+        return response_data
+        
+    except Exception as e:
+        import traceback
+        print(f"Error processing request: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     # 从环境变量获取配置
-    model_path = os.environ.get('MODEL_PATH', '/app/models/bge-large-zh-v1.5')
-    device = os.environ.get('DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
+    model_path = os.environ.get('MODEL_PATH', '/app/models/Qwen3-VL-Embedding-2B')
+    device = os.environ.get('DEVICE', 'cpu')
     port = int(os.environ.get('PORT', '6008'))
-    embedding_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2560'))
+    embedding_dimension = int(os.environ.get('EMBEDDING_DIMENSION', '2048'))
     
-    print("=== 服务配置 ===")
+    print("=" * 50)
+    print("Embedding API with Qwen3-VL-Embedding-2B")
+    print("=" * 50)
     print(f"模型路径: {model_path}")
     print(f"计算设备: {device}")
     print(f"服务端口: {port}")
     print(f"嵌入维度: {embedding_dimension}")
+    print("=" * 50)
     
-    print(f"Loading model from {model_path} using device {device}")
-    embeddings_model = SentenceTransformer(model_path, device=device)
-    print(f"Model loaded successfully, starting server on port {port}")
+    # 加载模型
+    try:
+        load_model()
+        print(f"Model loaded successfully!")
+        print(f"Starting server on port {port}")
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
     
-    uvicorn.run(app, host='0.0.0.0', port=port)
+    # 监听所有网络接口，允许外部访问
+    host = os.environ.get('HOST', '0.0.0.0')
+    uvicorn.run(app, host=host, port=port)

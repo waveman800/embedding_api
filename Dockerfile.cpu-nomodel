@@ -1,0 +1,37 @@
+# CPU-only Dockerfile for Embedding API with Qwen3-VL-Embedding-2B
+# 模型外挂版本（镜像不包含模型文件）
+
+FROM ccr.ccs.tencentyun.com/waveman/python:3.12-slim
+
+WORKDIR /app
+
+# 更换 apt 源为国内镜像
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git wget curl libgomp1 libgl1 libglib2.0-0 && \
+    rm -rf /var/lib/apt/lists/*
+
+# 创建模型目录（挂载点）
+RUN mkdir -p /app/models
+
+# 安装 Python 依赖（CPU 版本）
+RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+    pip3 install --no-cache-dir --upgrade pip && \
+    pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    pip3 install --no-cache-dir transformers accelerate pillow fastapi uvicorn pydantic python-dotenv
+
+# 复制应用代码
+COPY embedding.py /app/
+
+# 环境变量
+ENV DEVICE=cpu
+ENV HOST=0.0.0.0
+ENV PORT=6008
+ENV PYTHONUNBUFFERED=1
+
+# 暴露端口
+EXPOSE 6008
+
+# 启动命令
+CMD ["python3", "embedding.py"]

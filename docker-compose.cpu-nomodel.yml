@@ -1,0 +1,32 @@
+services:
+  embedding-api-cpu:
+    build:
+      context: .
+      dockerfile: Dockerfile.cpu-nomodel
+    image: embedding-api:qwen3vl-cpu-nomodel
+    container_name: embedding-api-qwen3vl-cpu
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:${PORT:-6008}:6008"
+    env_file:
+      - .env
+    environment:
+      - HOST=0.0.0.0
+      - DEVICE=cpu
+    volumes:
+      - ${MODEL_HOST_PATH:-./models/Qwen3-VL-Embedding-2B}:/app/models/Qwen3-VL-Embedding-2B:ro
+      - ./.env:/app/.env:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '2'
+          memory: 2G

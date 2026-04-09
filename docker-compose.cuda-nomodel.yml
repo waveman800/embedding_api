@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  embedding-api-cuda:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda-runtime-nomodel
+    image: embedding-api:qwen3vl-cuda-nomodel
+    container_name: embedding-api-qwen3vl-cuda
+    restart: unless-stopped
+    # 网络模式: host 模式性能更好，或端口映射
+    # network_mode: host  # 使用主机网络（可选）
+    ports:
+      # 绑定到所有网络接口，允许外部访问
+      - "0.0.0.0:${PORT:-6008}:6008"
+    env_file:
+      - .env
+    environment:
+      # 确保服务监听所有接口
+      - HOST=0.0.0.0
+    volumes:
+      # 挂载模型目录（必需）
+      - ${MODEL_HOST_PATH:-./models/Qwen3-VL-Embedding-2B}:/app/models/Qwen3-VL-Embedding-2B:ro
+      # 挂载环境变量文件（可选，覆盖容器内配置）
+      - ./.env:/app/.env:ro
+      # 持久化缓存
+      - ./cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "f", "http://localhost:6008/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s

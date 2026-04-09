@@ -1,0 +1,31 @@
+#!/bin/bash
+# 加载 Qwen3-VL-Embedding-2B CUDA 镜像（模型外挂版本）
+
+IMAGE_FILE="embedding-api-qwen3vl-cuda-nomodel.tar.gz"
+
+echo "Loading Docker image from $IMAGE_FILE..."
+docker load < "$IMAGE_FILE"
+
+echo ""
+echo "Image loaded successfully!"
+echo ""
+echo "=================================================="
+echo "重要: 此镜像不包含模型文件，需要单独下载模型"
+echo "=================================================="
+echo ""
+echo "步骤 1: 准备 .env 配置文件"
+echo "  cp .env.example .env"
+echo "  # 编辑 .env 文件，修改必要配置"
+echo ""
+echo "步骤 2: 下载模型"
+echo "  python3 download-model.py"
+echo ""
+echo "步骤 3: 启动服务（使用 docker-compose）"
+echo "  docker-compose -f docker-compose.cuda-nomodel.yml up -d"
+echo ""
+echo "或直接使用 docker:"
+echo "  docker run -d --gpus all -p 6008:6008 \\"
+echo "    -v \$(pwd)/.env:/app/.env:ro \\"
+echo "    -v \$(pwd)/models/Qwen3-VL-Embedding-2B:/app/models/Qwen3-VL-Embedding-2B:ro \\"
+echo "    embedding-api:qwen3vl-cuda-nomodel"
+echo ""
