@@ -1,4 +1,4 @@
-# Qwen3-VL-Embedding-2B Docker 服务
+# Qwen3-VL-Embedding-2B API 服务
 
 基于 Qwen3-VL-Embedding-2B 模型的嵌入向量生成服务，提供 RESTful API 接口。
 
