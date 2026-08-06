@@ -146,7 +146,12 @@ def get_embedding_for_text(text: str) -> np.ndarray:
 
 async def verify_token(request: Request):
     auth_header = request.headers.get('Authorization')
-    api_key = os.environ.get('API_KEY', 'sk-hv6xtPbK183j3RR306Fe23B6196b4d919a8e854887F6213d')
+    api_key = os.environ.get('API_KEY')
+    if not api_key:
+        return HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="API_KEY not configured in environment",
+        )
     if auth_header:
         token_type, _, token = auth_header.partition(' ')
         if token_type.lower() == "bearer" and token == api_key:
