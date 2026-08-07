@@ -18,7 +18,8 @@ RUN mkdir -p /app/models
 # 安装 Python 依赖（CPU 版本）
 RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
     pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+    # 统一从 CPU 源安装 torch 全家桶，保证 torch/torchvision/torchaudio 版本匹配
+    pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu && \
     pip3 install --no-cache-dir transformers accelerate pillow fastapi uvicorn pydantic python-dotenv
 
 # 复制应用代码

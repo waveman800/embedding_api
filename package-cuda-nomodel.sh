@@ -40,7 +40,7 @@ DOCKERFILE="Dockerfile.cuda-runtime-nomodel"
 
 echo "镜像名称: $IMAGE_NAME:$IMAGE_TAG"
 echo "输出文件: $OUTPUT_FILE"
-echo "基础镜像: ccr.ccs.tencentyun.com/waveman/cuda:12.4.1-runtime-ubuntu22.04"
+echo "基础镜像: ccr.ccs.tencentyun.com/waveman/cuda:12.8.1-runtime-ubuntu22.04"
 echo "Dockerfile: $DOCKERFILE"
 echo ""
 echo -e "${YELLOW}注意: 此版本镜像不包含模型文件${NC}"

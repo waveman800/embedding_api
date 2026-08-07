@@ -8,7 +8,7 @@ starlette>=0.27.0
 Pillow>=10.0.0
 
 # ML/NLP Libraries
-torch>=2.1.0
+# torch/torchvision/torchaudio 由 Dockerfile 单独安装（CPU/CUDA 版本不同）
 transformers>=4.36.0
 accelerate>=0.25.0
 

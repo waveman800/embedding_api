@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cuda-runtime-nomodel
-    image: embedding-api:qwen3vl-cuda-nomodel
+    image: harbor.bhidi.com/ai/embedding-api:qwen3vl-cuda-nomodel
     container_name: embedding-api-qwen3vl-cuda
     restart: unless-stopped
     # 网络模式: host 模式性能更好，或端口映射

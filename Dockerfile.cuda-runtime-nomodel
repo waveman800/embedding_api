@@ -1,7 +1,9 @@
 # CUDA Runtime Dockerfile - 模型外挂版本
 # 模型通过挂载方式加载，环境变量通过 .env 文件配置
+#
+# 基础镜像使用 CUDA 12.8 runtime，与下方 cu128 源安装的 PyTorch 版本匹配。
 
-FROM ccr.ccs.tencentyun.com/waveman/cuda:12.4.1-runtime-ubuntu22.04
+FROM ccr.ccs.tencentyun.com/waveman/cuda:12.8.1-runtime-ubuntu22.04
 
 WORKDIR /app
 
@@ -26,13 +28,23 @@ RUN mkdir -p /app/models
 # 复制依赖文件
 COPY requirements.txt /app/
 
-# 安装 Python 依赖（CUDA 版本）
-RUN pip3 config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
-    pip3 config set global.trusted-host mirrors.aliyun.com && \
-    pip3 install --no-cache-dir --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt && \
-    pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121 && \
-    pip3 install --no-cache-dir modelscope transformers accelerate pillow python-dotenv
+# 安装 uv（比 pip 更快）并安装 Python 依赖（CUDA 版本）
+RUN pip3 install --no-cache-dir uv && \
+    # 先安装 torch 全家桶（固定版本，保证 torch/torchvision/torchaudio 的 CUDA 版本一致）
+    # 注意: 必须只使用 cu128 源安装，不能混用 aliyun/PyPI 源。
+    #       因为 PyPI 上的 torch 2.7.1 默认是 CUDA 13.0，而 cu128 源是 CUDA 12.8，
+    #       混用会导致 torch(CUDA 13.0) 与 torchaudio(CUDA 12.8) 版本不匹配。
+    #       使用 --index-strategy unsafe-best-match 时 pip 可能从 PyPI 拉取 CUDA 13.0 的 torch。
+    uv pip install --system --no-cache \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        torch==2.11.0 torchvision==0.26.0 torchaudio==2.11.0 && \
+    # 再安装其余依赖（requirements.txt 已移除 torch 约束，避免版本冲突）
+    # 只使用 aliyun 源，不混用 cu128 源
+    uv pip install --system --no-cache \
+        --index-url https://mirrors.aliyun.com/pypi/simple/ \
+        -r requirements.txt && \
+    uv pip install --system --no-cache --index-url https://mirrors.aliyun.com/pypi/simple/ \
+        modelscope accelerate pillow python-dotenv
 
 # 复制应用文件
 COPY embedding.py /app/
